@@ -97,7 +97,7 @@ Social 보정·슬롯 제한·다지역 이주는 학습 때 없던 조건이다
 ## 참고 근거
 
 - [PPO/Mass 종합 Architecture](PPO_MASS_ECOSYSTEM_ARCHITECTURE.md), [Policy V1](../RL_Policy/POLICY_CONTRACT_V1.md), [Processor 순서](../Mass/MASS_PROCESSOR_ORDER.md)
-- [M3 구현 계획](../Roadmap/M3/M3_IMPLEMENTATION_PLAN.md), [M5 폐루프](../Roadmap/M5/M5_PPO_CLOSED_LOOP.md)
+- [M3 구현 현황·검증](../Roadmap/M3/README.md), [M5 폐루프](../Roadmap/M5/M5_PPO_CLOSED_LOOP.md)
 - [Unreal 정책 통합 현황](../RL_Policy/UNREAL_POLICY_INTEGRATION.md), [Social 구현 현황](../조연우/SOCIAL_BEHAVIOR_RUNTIME_CURRENT_STATE.md)
 - [학습 결과 요약](../../../herbivore_rl/docs/PROJECT_SUMMARY.md), [저장된 비교 평가](../../../herbivore_rl/results/compare.md)
 - 연결 확인: `AI/Policy/EcoBehaviorProcessors.cpp`, `EcoWorldProviders.*`, `EcoRegionPredationSubsystem.cpp`, `AI/Social/Alarm/EcoAlarmProcessors.cpp`, `AI/Social/Shelter/EcoShelterProcessors.cpp`, `Mass/EcoMassNetworkTrait.cpp`, `Network/Mass/EcoMassReplicationTypes.h`.
