@@ -3,6 +3,8 @@
 > 기준 엔진: **Unreal Engine 5.8**  
 > 목표: **Steam 멀티플레이 + Server 권위 Mass 생태계 + PPO 정책의 MVP 완성**
 
+**현재 M4 이후 통합 계획:** [Production Integration 로드맵](ProductionIntegration/README.md). wonkii의 기존 런타임과 협업 PR을 연결하기 위한 기능·구조·구현 순서를 주제별로 요약한다. 아래 M0~M6는 기존 마일스톤 체계이며, 신규 계획을 구현 완료 기록으로 해석하지 않는다.
+
 ---
 
 ## 1. 방향성 검증 결과
