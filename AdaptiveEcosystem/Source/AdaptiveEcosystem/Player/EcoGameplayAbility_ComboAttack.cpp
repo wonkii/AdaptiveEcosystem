@@ -7,6 +7,7 @@
 #include "GameFramework/Character.h"
 #include "Components/SkeletalMeshComponent.h"
 #include "Player/EcoPlayerState.h"
+#include "Player/EcoHandFoodComponent.h"
 UEcoGameplayAbility_ComboAttack::UEcoGameplayAbility_ComboAttack()
 {
     bReplicateInputDirectly = true;
@@ -20,7 +21,8 @@ void UEcoGameplayAbility_ComboAttack::ActivateAbility(const FGameplayAbilitySpec
     auto* Data = HitComponent ? HitComponent->AttackData.Get() : nullptr;
     const auto* Pawn = Cast<APawn>(Info->AvatarActor.Get());
     const auto* State = Pawn ? Pawn->GetPlayerState<AEcoPlayerState>() : nullptr;
-    if ((State && !State->IsAlive()) || !Data || !Data->Montage || Data->Steps.IsEmpty() || !Info->GetAnimInstance()) { EndAbility(Handle, Info, Activation, true, true); return; }
+    if ((State && !State->IsAlive()) || UEcoHandFoodComponent::ActorIsHoldingFood(Pawn)
+        || !Data || !Data->Montage || Data->Steps.IsEmpty() || !Info->GetAnimInstance()) { EndAbility(Handle, Info, Activation, true, true); return; }
     for (const auto& Step : Data->Steps)
         if (!Info->SkeletalMeshComponent->DoesSocketExist(Step.Socket) || Data->Montage->GetSectionIndex(Step.Section) == INDEX_NONE) { EndAbility(Handle, Info, Activation, true, true); return; }
     if (!CommitAbility(Handle, Info, Activation)) { EndAbility(Handle, Info, Activation, true, true); return; }

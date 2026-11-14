@@ -338,7 +338,8 @@ void AEcoCreatureIntegrationSpawner::UpdatePresentationAndNoise(float Delta)
             if (Behavior->BehaviorId == 0) Present.Flags |= 2;
             if(NaturalHabitatProfile||!RegionHabitatProfiles.IsEmpty()){
                 if(const auto* Body=EM.GetFragmentDataPtr<FEcoHerbivoreBodyV3Fragment>(E)){
-                    if(Body->Body.LastIntake<=1.e-9)Present.Flags&=~uint8(2);
+                    const auto* Link = EM.GetFragmentDataPtr<FEcoIntegratedV3Fragment>(E);
+                    if (Body->Body.LastIntake + (Link ? Link->LastHandFeedIntake : 0.) <= 1.e-9) Present.Flags &= ~uint8(2);
                 }
                 if(EM.GetFragmentDataPtr<FEcoHerbivoreBodyV3Fragment>(E))if(const auto* Link=EM.GetFragmentDataPtr<FEcoIntegratedV3Fragment>(E);Link&&Link->Individual.bInitialized){
                     const double Now=V.HP<=0&&Life.DeathTime>=0?Life.DeathTime:

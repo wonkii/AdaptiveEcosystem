@@ -7,6 +7,8 @@
 
 class UAbilitySystemComponent;
 class UEcoHealthAttributeSet;
+class UEcoHandFoodDefinition;
+class UEcoHandFoodComponent;
 struct FOnAttributeChangeData;
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FEcoPlayerHealthChanged, float, Health, float, MaxHealth);
 
@@ -17,6 +19,7 @@ class ADAPTIVEECOSYSTEM_API AEcoPlayerState : public APlayerState, public IAbili
 
 public:
     AEcoPlayerState();
+    void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const override;
     UAbilitySystemComponent* GetAbilitySystemComponent() const override;
     void InitializeHealthForAvatar(APawn* Pawn);
     float ApplyCreatureDamage(APawn* ExpectedAvatar, float Damage, int64 AttackerId);
@@ -29,11 +32,17 @@ public:
     UPROPERTY(VisibleInstanceOnly, BlueprintReadOnly, Category="Health") int64 LastCreatureAttacker = 0;
     uint32 AvatarGeneration = 0;
 
+    UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="Hand Food") TObjectPtr<UEcoHandFoodDefinition> HandFood;
+    UPROPERTY(EditDefaultsOnly, Category="Hand Food", meta=(ClampMin="0")) int32 StartingHandFoodCount = 10;
+    UFUNCTION(BlueprintPure, Category="Hand Food") int32 GetHandFoodCount() const { return HandFoodCount; }
+
 protected:
     void BeginPlay() override;
     void EndPlay(const EEndPlayReason::Type Reason) override;
 
 private:
+    friend class UEcoHandFoodComponent;
+    UPROPERTY(Replicated) int32 HandFoodCount = 0;
     void HealthChanged(const FOnAttributeChangeData& Change);
     void ApplyDeathToAvatar();
     void Respawn();

@@ -7,6 +7,7 @@
 #include "Net/UnrealNetwork.h"
 #include "AbilitySystemGlobals.h"
 #include "AbilitySystemComponent.h"
+#include "Player/EcoHandFoodComponent.h"
 UEcoEquipmentComponent::UEcoEquipmentComponent() { SetIsReplicatedByDefault(true); WeaponClass=AEcoWeaponActor::StaticClass(); }
 void UEcoEquipmentComponent::BeginPlay() { Super::BeginPlay(); if (GetOwner()->HasAuthority() && InitialWeapon) Equip(InitialWeapon); }
 bool UEcoEquipmentComponent::Equip(UEcoWeaponDefinition* Data)
@@ -24,6 +25,7 @@ bool UEcoEquipmentComponent::Equip(UEcoWeaponDefinition* Data)
     if (!NewWeapon) return false;
     NewWeapon->Initialize(Data); FTransform Muzzle;
     if (!NewWeapon->GetMuzzleTransform(Muzzle)) { NewWeapon->Destroy(); return false; }
+    if (auto* Food = C->FindComponentByClass<UEcoHandFoodComponent>()) Food->ClearHeldFood();
     Unequip(); Weapon=NewWeapon; OnRep_Weapon(); C->ForceNetUpdate(); return true;
 }
 void UEcoEquipmentComponent::Unequip()
@@ -42,6 +44,12 @@ void UEcoEquipmentComponent::OnRep_Weapon()
         Weapon->AttachToComponent(C->GetMesh(),FAttachmentTransformRules::SnapToTargetNotIncludingScale,Weapon->Definition->GripSocket);
         Weapon->SetActorRelativeTransform(Weapon->Definition->GripOffset);
     }
+    RefreshWeaponVisibility();
+}
+void UEcoEquipmentComponent::RefreshWeaponVisibility() const
+{
+    if (const auto* Food = GetOwner()->FindComponentByClass<UEcoHandFoodComponent>(); Weapon && Food)
+        Weapon->SetActorHiddenInGame(Food->IsHoldingFood());
 }
 void UEcoEquipmentComponent::EndPlay(const EEndPlayReason::Type Reason) { Unequip(); Super::EndPlay(Reason); }
 void UEcoEquipmentComponent::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const

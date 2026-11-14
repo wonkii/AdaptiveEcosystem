@@ -4,10 +4,13 @@
 #include "Player/EcoWeaponDefinition.h"
 #include "Player/EcoAimComponent.h"
 #include "Player/EcoPlayerState.h"
+#include "Player/EcoHandFoodComponent.h"
 #include "Player/EcoCombatRelevanceComponent.h"
 #include "Player/EcoDamageReceiver.h"
 #include "Creature/Player/EcoCreatureHitProxy.h"
 #include "Creature/Runtime/EcoCreatureIntegrationSpawner.h"
+#include "Components/LineBatchComponent.h"
+#include "Engine/World.h"
 #include "GameFramework/PlayerController.h"
 #include "EngineUtils.h"
 UEcoWeaponFireComponent::UEcoWeaponFireComponent() { SetIsReplicatedByDefault(true); }
@@ -15,7 +18,7 @@ void UEcoWeaponFireComponent::RequestFire()
 {
     auto* P=Cast<APawn>(GetOwner()); auto* PC=P?Cast<APlayerController>(P->GetController()):nullptr;
     auto* E=GetOwner()->FindComponentByClass<UEcoEquipmentComponent>();
-    if (!PC || !P->IsLocallyControlled() || !E || !E->Weapon) return;
+    if (!PC || !P->IsLocallyControlled() || !E || !E->Weapon || UEcoHandFoodComponent::ActorIsHoldingFood(P)) return;
     if (auto* R=P->FindComponentByClass<UEcoCombatRelevanceComponent>()) R->ReportPresented();
     FVector Origin; FRotator Rotation; PC->GetPlayerViewPoint(Origin,Rotation);
     ServerFire(Origin,Rotation.Vector(),E->Weapon);
@@ -36,7 +39,7 @@ void UEcoWeaponFireComponent::ServerFire_Implementation(FVector_NetQuantize Orig
     auto* W=E?E->Weapon.Get():nullptr; auto* D=W?W->Definition.Get():nullptr;
     const auto* MuzzleProvider=Cast<IEcoRangedWeapon>(W);
     const double Now=GetWorld()->GetTimeSeconds(); FTransform M;
-    if (!P || !P->IsPlayerControlled() || !S || !S->IsAlive() || !A || !A->bAiming || !W || W!=Expected || !D
+    if (!P || !P->IsPlayerControlled() || !S || !S->IsAlive() || UEcoHandFoodComponent::ActorIsHoldingFood(P) || !A || !A->bAiming || !W || W!=Expected || !D
         || Now<NextAllowedFire || (!MuzzleProvider || !MuzzleProvider->GetMuzzleTransform(M)) || Origin.ContainsNaN() || Direction.ContainsNaN()
         || FVector::DistSquared(Origin,P->GetActorLocation())>FMath::Square(650.f)
         || FVector::DotProduct(Direction.GetSafeNormal(),P->GetControlRotation().Vector())<.95f
@@ -72,7 +75,20 @@ void UEcoWeaponFireComponent::ServerFire_Implementation(FVector_NetQuantize Orig
     if (Target->Implements<UEcoDamageReceiver>()) { IEcoDamageReceiver::Execute_SubmitPointDamage(Target,Damage); return; }
     for (auto* C:Target->GetComponents()) if (C->Implements<UEcoDamageReceiver>()) { IEcoDamageReceiver::Execute_SubmitPointDamage(C,Damage); break; }
 }
-void UEcoWeaponFireComponent::MulticastShot_Implementation(int64 Id,FVector_NetQuantize M,FVector_NetQuantize E) { OnShot.Broadcast(Id,M,E); }
+void UEcoWeaponFireComponent::MulticastShot_Implementation(int64 Id, FVector_NetQuantize Muzzle, FVector_NetQuantize End)
+{
+    const APawn* Shooter = Cast<APawn>(GetOwner());
+    if (Shooter && Shooter->IsLocallyControlled())
+    {
+        if (ULineBatchComponent* Lines = GetWorld()->GetLineBatcher(UWorld::ELineBatcherType::WorldPersistent))
+        {
+            constexpr float TraceThickness = 2.f;
+            constexpr float TraceLifetime = 0.5f;
+            Lines->DrawLine(Muzzle, End, FLinearColor::Red, SDPG_World, TraceThickness, TraceLifetime);
+        }
+    }
+    OnShot.Broadcast(Id, Muzzle, End);
+}
 void UEcoWeaponFireComponent::PublishDamageOutcome(const FEcoCombatDamageOutcome& O) { OnDamageOutcome.Broadcast(O); if (GetNetMode()!=NM_Standalone) ClientDamageOutcome(O); }
 void UEcoWeaponFireComponent::ClientDamageOutcome_Implementation(const FEcoCombatDamageOutcome& O)
 { if (!GetOwner()->HasAuthority()) OnDamageOutcome.Broadcast(O); }

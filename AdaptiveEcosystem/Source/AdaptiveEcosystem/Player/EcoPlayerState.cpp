@@ -8,6 +8,8 @@
 #include "GameFramework/GameModeBase.h"
 #include "GameFramework/PlayerController.h"
 #include "TimerManager.h"
+#include "Net/UnrealNetwork.h"
+#include "Player/EcoHandFoodComponent.h"
 
 AEcoPlayerState::AEcoPlayerState()
 {
@@ -27,8 +29,17 @@ void AEcoPlayerState::BeginPlay()
     Super::BeginPlay();
     AbilitySystem->GetGameplayAttributeValueChangeDelegate(UEcoHealthAttributeSet::GetHealthAttribute()).AddUObject(this, &ThisClass::HealthChanged);
     if (HasAuthority())
+    {
+        HandFoodCount = HandFood ? FMath::Max(0, StartingHandFoodCount) : 0;
         AbilitySystem->AddLooseGameplayTags(ServerClassificationTags);
+    }
     if(auto* Pawn=GetPawn())if(auto* Avatar=Pawn->FindComponentByClass<UEcoAbilityAvatarComponent>())Avatar->RefreshAvatar();
+}
+
+void AEcoPlayerState::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const
+{
+    Super::GetLifetimeReplicatedProps(OutLifetimeProps);
+    DOREPLIFETIME_CONDITION(AEcoPlayerState, HandFoodCount, COND_OwnerOnly);
 }
 
 void AEcoPlayerState::SetInvulnerable(bool bEnabled) { if(HasAuthority())bInvulnerable=bEnabled; }
@@ -59,6 +70,9 @@ float AEcoPlayerState::ApplyCreatureDamage(APawn* ExpectedAvatar, float Damage, 
     FGameplayEffectSpec Spec(Effect, AbilitySystem->MakeEffectContext(), 1.f);
     AbilitySystem->ApplyGameplayEffectSpecToSelf(Spec);
     const float Applied = Before - GetHealth();
+    if (Applied > 0)
+        if (auto* Food = ExpectedAvatar->FindComponentByClass<UEcoHandFoodComponent>())
+            Food->InvalidatePendingOffer();
     UE_LOG(LogTemp, Log, TEXT("[EcoCombat][PlayerDamage] Player=%s Wolf=%lld Applied=%.2f HP=%.2f Avatar=%u"), *GetName(), AttackerId, Applied, GetHealth(), AvatarGeneration);
     return Applied;
 }
@@ -73,6 +87,8 @@ void AEcoPlayerState::ApplyDeathToAvatar()
     if (auto* Character = Cast<ACharacter>(Pawn)) { Character->GetCharacterMovement()->StopMovementImmediately(); Character->GetCharacterMovement()->DisableMovement(); }
     if (!HasAuthority() || bDeathHandled) return;
     bDeathHandled = true;
+    if (auto* Food = Pawn ? Pawn->FindComponentByClass<UEcoHandFoodComponent>() : nullptr)
+        Food->ClearHeldFood();
     AbilitySystem->CancelAllAbilities();
     UE_LOG(LogTemp, Log, TEXT("[EcoCombat][PlayerDeath] Player=%s Wolf=%lld Avatar=%u"), *GetName(), LastCreatureAttacker, AvatarGeneration);
     if (RespawnDelay > 0) GetWorldTimerManager().SetTimer(RespawnTimer, this, &ThisClass::Respawn, RespawnDelay, false);

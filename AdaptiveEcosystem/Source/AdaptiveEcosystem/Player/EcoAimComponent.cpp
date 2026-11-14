@@ -3,6 +3,7 @@
 #include "Player/EcoWeaponActor.h"
 #include "Player/EcoWeaponDefinition.h"
 #include "Player/EcoPlayerState.h"
+#include "Player/EcoHandFoodComponent.h"
 #include "AdaptiveEcosystemCharacter.h"
 #include "Camera/CameraComponent.h"
 #include "GameFramework/SpringArmComponent.h"
@@ -14,7 +15,7 @@ bool UEcoAimComponent::SetAiming(bool Value)
 {
     auto* E=GetOwner()->FindComponentByClass<UEcoEquipmentComponent>();
     const auto* P=Cast<APawn>(GetOwner()); const auto* S=P?P->GetPlayerState<AEcoPlayerState>():nullptr;
-    bAiming=Value && E && E->Weapon && S && S->IsAlive(); return bAiming;
+    bAiming=Value && E && E->Weapon && S && S->IsAlive() && !UEcoHandFoodComponent::ActorIsHoldingFood(P); return bAiming;
 }
 void UEcoAimComponent::TickComponent(float Delta,ELevelTick Type,FActorComponentTickFunction* Tick)
 {

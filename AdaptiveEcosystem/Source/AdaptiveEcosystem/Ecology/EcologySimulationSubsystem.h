@@ -12,6 +12,7 @@
 #include "Core/EcoResourceTypes.h"
 #include "Core/EcoSurvivalTypes.h"
 #include "Core/EcoMigrationTypes.h"
+#include "Core/EcoPlayerInteractionTypes.h"
 #include "EcologySimulationSubsystem.generated.h"
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnRegionPredationRecorded, FName, RegionId, float, NewPredationHistory);
@@ -33,6 +34,12 @@ class ADAPTIVEECOSYSTEM_API UEcologySimulationSubsystem : public UWorldSubsystem
 
 public:
 	UEcologySimulationSubsystem();
+
+	bool ReadHumanReputation(int32 Epoch, FName RegionId, FName SpeciesId,
+		const FEcoSpeciesPlayerInteractionProfile& Profile, FEcoRegionalHumanReputation& Out) const;
+	bool RecordHumanReputation(int32 Epoch, FName RegionId, FName SpeciesId,
+		const FEcoSpeciesPlayerInteractionProfile& Profile, int64 NativeStep, double AppliedDamageFraction,
+		FEcoRegionalHumanReputation& Out, double& OutDelta);
 
 	virtual bool ShouldCreateSubsystem(UObject* Outer) const override;
 	virtual void Initialize(FSubsystemCollectionBase& Collection) override;
@@ -154,6 +161,8 @@ private:
 	/** Map of authoritative regional states keyed by RegionId */
 	UPROPERTY(Transient)
 	TMap<FName, FRegionEcologyState> RegionalStates;
+	int32 HumanReputationEpoch = 0;
+	TMap<FName, TMap<FName, FEcoRegionalHumanReputation>> HumanReputationByRegion;
 
 	/** Monotonic world-local allocator; zero is permanently reserved as invalid. */
 	FEcoAgentId NextStableAgentId = 1;

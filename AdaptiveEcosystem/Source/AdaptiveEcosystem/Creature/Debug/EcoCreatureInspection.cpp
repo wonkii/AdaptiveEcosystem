@@ -19,12 +19,17 @@
 #include "Engine/Engine.h"
 #include "Engine/World.h"
 #include "Engine/Canvas.h"
+#include "CanvasItem.h"
+#include "Player/EcoEquipmentComponent.h"
 #include "Player/EcoPlayerState.h"
+#include "Player/EcoWeaponActor.h"
 #include "EngineUtils.h"
+#include "GameFramework/Pawn.h"
 #include "GameFramework/PlayerController.h"
 #include "InputCoreTypes.h"
 #include "Misc/Paths.h"
 #include "Misc/FileHelper.h"
+#include "Misc/ScopeExit.h"
 #include "HAL/FileManager.h"
 #include "Dom/JsonObject.h"
 #include "Serialization/JsonSerializer.h"
@@ -312,6 +317,28 @@ bool UEcoCreatureInspectionLibrary::CaptureAgent(UObject* Context,int64 AgentId,
             }
             if(const auto* B=Manager.GetFragmentDataPtr<FEcoHerbivoreBodyV3Fragment>(E)){
                 Data->SetNumberField(TEXT("last_intake"),B->Body.LastIntake);
+                if (const auto* Link = Manager.GetFragmentDataPtr<FEcoIntegratedV3Fragment>(E); Link && Link->InteractionEvidenceStep >= 0)
+                {
+                    Data->SetNumberField(TEXT("interaction_step"), double(Link->InteractionEvidenceStep));
+                    Data->SetNumberField(TEXT("last_hand_feed_intake"), Link->LastHandFeedIntake);
+                    TArray<TSharedPtr<FJsonValue>> Players;
+                    for (int32 Index = 0; Index < Link->VisibleInteractionCount; ++Index)
+                    {
+                        const auto& Seen = Link->VisibleInteractions[Index];
+                        const auto Player = MakeShared<FJsonObject>();
+                        Player->SetNumberField(TEXT("player_id"), Seen.PlayerId);
+                        Player->SetBoolField(TEXT("hand_known"), Seen.bHandKnown);
+                        Player->SetStringField(TEXT("food_id"), Seen.VisibleFoodId.ToString());
+                        Player->SetBoolField(TEXT("reputation_known"), Seen.bReputationKnown);
+                        if (Seen.bReputationKnown)
+                        {
+                            Player->SetNumberField(TEXT("reputation"), Seen.Reputation.Score);
+                            Player->SetNumberField(TEXT("reputation_revision"), double(Seen.Reputation.Revision));
+                        }
+                        Players.Add(MakeShared<FJsonValueObject>(Player));
+                    }
+                    Data->SetArrayField(TEXT("visible_player_interactions"), Players);
+                }
                 Data->SetNumberField(TEXT("reserve"),B->Body.Reserve);
                 Data->SetNumberField(TEXT("native_head_x"),B->Body.Head.X);Data->SetNumberField(TEXT("native_head_y"),B->Body.Head.Y);
             }
@@ -423,10 +450,25 @@ void AEcoCreatureInspectorHUD::DrawGrassInspection()
 void AEcoCreatureInspectorHUD::DrawHUD()
 {
     Super::DrawHUD();if(!Canvas||!PlayerOwner)return;
+    const auto* State = PlayerOwner->GetPlayerState<AEcoPlayerState>();
+    // Keep the aiming dot above the inspection panels, including early returns.
+    ON_SCOPE_EXIT
+    {
+        const APawn* Pawn = PlayerOwner->GetPawn();
+        const auto* Equipment = Pawn ? Pawn->FindComponentByClass<UEcoEquipmentComponent>() : nullptr;
+        if (State && State->IsAlive() && Equipment && IsValid(Equipment->Weapon))
+        {
+            const FVector2D Center(Canvas->SizeX * 0.5f, Canvas->SizeY * 0.5f);
+            FCanvasNGonItem Outline(Center, FVector2D(4.f, 4.f), 12, FLinearColor::Black);
+            FCanvasNGonItem Dot(Center, FVector2D(2.5f, 2.5f), 12, FLinearColor::White);
+            Canvas->DrawItem(Outline);
+            Canvas->DrawItem(Dot);
+        }
+    };
 #if !UE_BUILD_SHIPPING
     DrawGrassInspection();
 #endif
-    if (const auto* State=PlayerOwner->GetPlayerState<AEcoPlayerState>())
+    if (State)
         DrawText(FString::Printf(TEXT("HP %.0f%s"),State->GetHealth(),State->IsAlive()?TEXT(""):TEXT("  DEFEATED")),
             State->IsAlive()?FLinearColor::White:FLinearColor::Red,Canvas->SizeX-190,25,nullptr,1.f);
     TArray<AEcoCreatureRepresentationActor*> Actors;
@@ -497,7 +539,26 @@ void AEcoCreatureInspectorHUD::DrawHUD()
                     InspectionDetail+=FString(Key)+TEXT(": ")+Value+TEXT("\n");
                 }
                 if(GetWorld()->GetNetMode()==NM_Client)InspectionDetail=TEXT("Client: presentation only. Policy details are available on authority.");
-                else if(const TSharedPtr<FJsonObject>* Life=nullptr;J->TryGetObjectField(TEXT("life"),Life)&&Life&&Life->IsValid()){
+                else {
+                    const TArray<TSharedPtr<FJsonValue>>* Players = nullptr;
+                    if (J->TryGetArrayField(TEXT("visible_player_interactions"), Players))
+                    {
+                        if (Players->IsEmpty())
+                            InspectionDetail += TEXT("Hand food: no visible players\n");
+                        for (const auto& Value : *Players)
+                        {
+                            const auto& Player = Value->AsObject();
+                            const FString Hand = Player->GetBoolField(TEXT("hand_known"))
+                                ? Player->GetStringField(TEXT("food_id")) : TEXT("occluded");
+                            const FString Reputation = Player->GetBoolField(TEXT("reputation_known"))
+                                ? FString::SanitizeFloat(Player->GetNumberField(TEXT("reputation"))) : TEXT("unavailable");
+                            InspectionDetail += FString::Printf(TEXT("Player %.0f | Hand %s | Regional rep %s\n"),
+                                Player->GetNumberField(TEXT("player_id")), *Hand, *Reputation);
+                        }
+                    }
+                }
+                if(GetWorld()->GetNetMode()!=NM_Client)
+                if(const TSharedPtr<FJsonObject>* Life=nullptr;J->TryGetObjectField(TEXT("life"),Life)&&Life&&Life->IsValid()){
                     const auto& L=**Life;
                     InspectionDetail+=FString::Printf(TEXT("Life gen %.0f | growth %.0f%% | genes speed %.3f size %.3f\nFamiliar %.2f Curious %.2f Fear %.2f Hostile %.2f Unknown %.2f\nEncounter %.0f Response %.0f Role %.0f | nutrition %.2f\n"),
                         L.GetNumberField(TEXT("generation")),L.GetNumberField(TEXT("growth"))*100,L.GetNumberField(TEXT("speed_gene")),L.GetNumberField(TEXT("size_gene")),

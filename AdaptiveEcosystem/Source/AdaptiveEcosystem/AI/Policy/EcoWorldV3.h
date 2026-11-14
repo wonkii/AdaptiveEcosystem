@@ -2288,6 +2288,17 @@ namespace EcoWorldV3
 	 * 참이면 통과, 거짓이면 막힘 — 그 개체는 이번 스텝 이동 전 자리에 남는다 (학습 세계에는 없는 막힘. 근사로 기록한다).
 	 * 움직이지 않은 개체(From == To)는 부르지 않는다.
 	 */
+	// Optional read-only probe for one row, scoped to a single Step call.
+	struct FHerbMotionSample
+	{
+		std::int32_t Row = -1;
+		EcoRepertoireV3::FControlOutput BeforeHook, FinalControl;
+		FVec2 ActualMove;
+		std::int32_t Behavior = 0, Seq = 0, LockLeft = 0, StartleLeft = 0;
+		std::int32_t Request = 0, Keep = 0, Route = -1;
+		bool bPolicyRead = false, bRouteRead = false;
+	};
+
 	struct FStepHooks
 	{
 		void* User = nullptr;
@@ -2300,6 +2311,9 @@ namespace EcoWorldV3
         void (*ThreatInput)(void* User,std::int32_t Index,FThreatAgent& Threat,EcoThreatV3::FThreatStepInput& Input) = nullptr;
 		bool (*HerbMove)(void* User, std::int32_t Index, const FVec2& From, const FVec2& To) = nullptr;
 		bool (*ThreatMove)(void* User, std::int32_t Index, double FromX, double FromY, double ToX, double ToY) = nullptr;
+		FHerbMotionSample* MotionSample = nullptr;
+        // C4 external source. Return zero or a committed bite <= Appetite.
+        double (*HerbHandFeed)(void* User, std::int32_t Index, const FHerbView& Herb, bool bCaught, double Appetite) = nullptr;
 	};
 
 	/** 세계 상태 (Mass 경로는 UEcoPolicyV3Subsystem 이 하나 가진다). */
@@ -2357,6 +2371,7 @@ namespace EcoWorldV3
 		std::vector<EcoThreatV3::FPackGoal> PackGoalBuf;  // 돕는 늑대의 목표
 		std::vector<double> PackCovers;                   // 은신처 원 (x, y, 사슴 반지름) — 반경 0 원(지워진 은신처)은 뺀다
 		std::vector<double> Want;
+		std::vector<double> HandFeedIntake;
 		std::vector<double> EDrained;
 		std::vector<std::int32_t> CellIdx;
 		// 도망 기록 (bFlightStats 일 때만): 늑대마다 지난 표적·이번 스텝 재료, 사슴마다 재료·열린 도망
@@ -4041,6 +4056,10 @@ namespace EcoWorldV3
 			{
 				*H.Control = R3::Control(*H.Rep, Detail::MakeControlInput(W, H), RC);
 			}
+            if (Hooks && Hooks->MotionSample && Hooks->MotionSample->Row == i)
+            {
+                Hooks->MotionSample->BeforeHook = *H.Control;
+            }
             if (Hooks && Hooks->HerbControl) {
                 Hooks->HerbControl(Hooks->User, i, H);
                 H.Decision->ExecutedBehavior = H.Rep->Behavior;
@@ -4158,6 +4177,23 @@ namespace EcoWorldV3
 					++W.Stats.BlockedHerbMoves;
 				}
 			}
+		}
+
+		if (Hooks && Hooks->MotionSample && Hooks->MotionSample->Row >= 0 && Hooks->MotionSample->Row < N)
+		{
+			auto& Sample = *Hooks->MotionSample;
+			const auto& H = Herbs[Sample.Row];
+			Sample.FinalControl = *H.Control;
+			Sample.ActualMove = R3::Sub(H.Body->Pos, H.Body->PrevPos);
+			Sample.Behavior = H.Rep->Behavior;
+			Sample.Seq = H.Rep->Seq;
+			Sample.LockLeft = H.Rep->LockLeft;
+			Sample.StartleLeft = H.Rep->StartleLeft;
+			Sample.Request = H.Decision->CommittedRequest;
+			Sample.Keep = H.Decision->KeepActive;
+			Sample.Route = H.Decision->Route;
+			Sample.bPolicyRead = H.Decision->bCommittedReads;
+			Sample.bRouteRead = H.Decision->bCommittedRouteReads;
 		}
 
 		// C2. 위협 스텝 (초식 이동 뒤 위치, 위협 이동 전 위치로 포획 거리)
@@ -4478,6 +4514,8 @@ namespace EcoWorldV3
 		W.Want.resize(static_cast<size_t>(N));
 		W.EDrained.resize(static_cast<size_t>(N));
 		W.CellIdx.resize(static_cast<size_t>(N));
+		const bool bHandFeed = Hooks && Hooks->HerbHandFeed;
+		if (bHandFeed) W.HandFeedIntake.resize(static_cast<size_t>(N));
 		F.Demand.assign(F.Food.size(), 0.0);
 		for (std::int32_t i = 0; i < N; ++i)
 		{
@@ -4486,11 +4524,14 @@ namespace EcoWorldV3
 			const bool Outside=Hooks&&Hooks->HerbTravel&&Hooks->HerbTravel(Hooks->User,i)
                 &&(H.Body->Pos.X<0||H.Body->Pos.Y<0||H.Body->Pos.X>W.Config.WorldSize||H.Body->Pos.Y>W.Config.WorldSize);
 			const double Want = Outside?0.0:R3::EatWant(Ed, R3::EffectiveEatMult(H.Control->EatMult, W.Dark, RC), RC);
+			const double Hand = bHandFeed ? Hooks->HerbHandFeed(Hooks->User, i, H, W.Catcher[static_cast<size_t>(i)] >= 0, Want) : 0.;
+			if (bHandFeed) W.HandFeedIntake[static_cast<size_t>(i)] = Hand;
+			const double PlantWant = Hand > 0. ? 0. : Want;
 			const std::int32_t Cell = F.CellOf(H.Body->Pos);
 			W.EDrained[static_cast<size_t>(i)] = Ed;
-			W.Want[static_cast<size_t>(i)] = Want;
+			W.Want[static_cast<size_t>(i)] = PlantWant;
 			W.CellIdx[static_cast<size_t>(i)] = Cell;
-			F.Demand[static_cast<size_t>(Cell)] += Want;
+			F.Demand[static_cast<size_t>(Cell)] += PlantWant;
 		}
 		for (size_t k = 0; k < F.Demand.size(); ++k)
 		{
@@ -4510,13 +4551,15 @@ namespace EcoWorldV3
 			const double Gain = W.Want[static_cast<size_t>(i)] * F.Demand[Cell];
 			const double Nutrition = F.Vegetation.bHabitatDynamics && F.Habitats[Cell].bNatural
 				? Gain * F.VegetationCells[Cell].NutritionMultiplier() : Gain;
-			B.Energy = R3::EnergyAfterIntake(W.EDrained[static_cast<size_t>(i)], Nutrition, RC);
+			const double Hand = bHandFeed ? W.HandFeedIntake[static_cast<size_t>(i)] : 0.;
+			const double TotalNutrition = Hand > 0. ? Hand : Nutrition;
+			B.Energy = R3::EnergyAfterIntake(W.EDrained[static_cast<size_t>(i)], TotalNutrition, RC);
 			B.LastIntake = Gain;                          // 기록만
 			W.Stats.EatSteps += Gain > 0.0 ? 1 : 0;
 			if (bReserve)
 			{
 				// 야생 (w1): 모자람은 비축에서, 남음은 비축으로 (world.py step 3) 의 _wild_reserve_step — 번식 C5 앞)
-				const FWildReserveDelta Dr = WildReserveStep(B.Energy, B.Reserve, Nutrition * RC.FoodEnergyPerUnit, W.ReserveCap, W.Config.WildReserve);
+				const FWildReserveDelta Dr = WildReserveStep(B.Energy, B.Reserve, TotalNutrition * RC.FoodEnergyPerUnit, W.ReserveCap, W.Config.WildReserve);
 				W.Stats.ReserveUsed += Dr.Used;
 				W.Stats.ReserveRefill += Dr.Refill;
 				++W.Stats.ReserveLiveSteps;

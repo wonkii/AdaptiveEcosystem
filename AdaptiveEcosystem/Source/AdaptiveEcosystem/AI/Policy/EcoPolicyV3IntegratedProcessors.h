@@ -57,6 +57,7 @@ struct FEcoV3DeerRec
 {
 	int64 Id = 0;
 	FName Region;
+	FName SpeciesId;
 	const FTransformFragment* Transform = nullptr;
 	FEcoVitalsFragment* Vitals = nullptr;
 	FEcoDeathFragment* Death = nullptr;
@@ -116,6 +117,12 @@ private:
 	TArray<uint8> KnowsPre;                 // 이번 Step 배열의 사슴마다 스텝 앞 관측에서 늑대를 아는가 (두뇌 행동 몫 기록)
 
 	TSet<FName> ReportedMissingRegions;
+
+	// Bounded capture for this processor's world. No Mass pointers survive the step.
+	void FinishMotionCapture(const UWorld& World);
+	int64 RequestedMotionAgent = 0;
+	int32 MotionStepsRemaining = 0;
+	TArray<FString> MotionRows;
 };
 
 UCLASS()

@@ -15,6 +15,7 @@ public:
     UFUNCTION(BlueprintCallable, BlueprintAuthorityOnly, Category="Weapon") bool Equip(UEcoWeaponDefinition* Data);
     UFUNCTION(BlueprintCallable, BlueprintAuthorityOnly, Category="Weapon") void Unequip();
     void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& Out) const override;
+    void RefreshWeaponVisibility() const;
 protected:
     void BeginPlay() override;
     void EndPlay(const EEndPlayReason::Type Reason) override;

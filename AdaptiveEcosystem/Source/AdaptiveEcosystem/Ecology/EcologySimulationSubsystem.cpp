@@ -37,6 +37,8 @@ void UEcologySimulationSubsystem::Initialize(FSubsystemCollectionBase& Collectio
 void UEcologySimulationSubsystem::Deinitialize()
 {
 	RegionalStates.Reset();
+	HumanReputationByRegion.Reset();
+	HumanReputationEpoch = 0;
 	NextStableAgentId = 1;
 	RegionIds.Reset();
 	SpeciesIds.Reset();

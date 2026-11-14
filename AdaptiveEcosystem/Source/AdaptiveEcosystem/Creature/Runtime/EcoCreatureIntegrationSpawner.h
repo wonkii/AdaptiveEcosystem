@@ -7,6 +7,7 @@
 #include "Core/EcoMigrationTypes.h"
 #include "Core/EcoSurvivalTypes.h"
 #include "Core/EcoCombatTypes.h"
+#include "Core/EcoPlayerInteractionTypes.h"
 #include "AI/Behavior/EcoSpeciesAIProfile.h"
 #include "Ecology/EcoSpawnSchedule.h"
 #include "Mass/EntityHandle.h"
@@ -27,6 +28,7 @@ class APawn;
 class AController;
 class AEcoCreatureHitProxy;
 class UEcoMeleeHitComponent;
+class UEcoHandFoodComponent;
 namespace EcoThreatV3 { struct FThreatStepInput; }
 struct FEcoV3RegionContext;
 struct FEcoDeathOutcome;
@@ -131,6 +133,19 @@ public:
     /** Explicit authority checkpoint. Slots are local Saved/Ecosystem names, not arbitrary paths. */
     UFUNCTION(BlueprintCallable, Category="Creature|Persistence") bool SaveEcosystem(const FString& Slot);
     UFUNCTION(BlueprintCallable, Category="Creature|Persistence") bool LoadEcosystem(const FString& Slot);
+    /** Empty disables player interaction. Keys must match the Mass Species ID. */
+    UPROPERTY(EditAnywhere, Category="Creature|Player Interaction")
+    TMap<FName, FEcoSpeciesPlayerInteractionProfile> PlayerInteractionProfiles;
+    bool IsPlayerInteractionEnabled() const;
+    const FEcoSpeciesPlayerInteractionProfile* FindPlayerInteractionProfile(FName SpeciesId) const;
+    UFUNCTION(BlueprintPure, BlueprintAuthorityOnly, Category="Creature|Player Interaction")
+    bool ReadRegionalHumanReputation(FName RegionId, FName SpeciesId, FEcoRegionalHumanReputation& Reputation) const;
+    EEcoHandFeedResult QueueHandFeed(UEcoHandFoodComponent& Food);
+    bool HasHandFeedFor(int64 TargetId) const { return HandFeedRequests.Contains(TargetId); }
+    void CancelHandFeedTarget(int64 TargetId, int64 NativeStep);
+    void CancelInvalidHandFeeds(int32 Epoch, int64 NativeStep);
+    double ConsumeHandFeed(int64 TargetId, FName RegionId, FName SpeciesId, const FEcoV3RegionContext& Context,
+        const FVector& BodyLocation, const FVector& MouthLocation, bool bSafe, double Appetite);
     /** Server-owned melee request; no client position, damage, target or outcome is accepted. */
     bool QueuePlayerStrike(APawn& Player);
     /** Called exclusively by authoritative socket sweeps; the server reads damage from their data asset. */
@@ -268,6 +283,18 @@ private:
 	UPROPERTY(Transient) TArray<TObjectPtr<AEcologyRegion>> Regions;
 	UPROPERTY(Transient) TArray<TObjectPtr<UMassEntityConfigAsset>> AdditionalClientConfigs;
 	TArray<FMassEntityHandle> Owned;
+    struct FHandFeedRequest
+    {
+        TWeakObjectPtr<UEcoHandFoodComponent> Source;
+        int64 RequestId = 0;
+        int64 ExpiresAtStep = 0;
+        int32 Epoch = 0;
+        uint32 AvatarGeneration = 0;
+        uint32 OfferGeneration = 0;
+        FName TargetRegion;
+    };
+    TMap<int64, TArray<FHandFeedRequest>> HandFeedRequests;
+    int64 HandFeedSequence = 0;
 	struct FBinding { TWeakObjectPtr<AEcoCreatureRepresentationActor> Actor; int64 Sequence = 0; uint32 MovementRevision = 0; };
 	TMap<int64, FBinding> Visuals;
 	UPROPERTY(Transient) TArray<TObjectPtr<AEcoCreatureRepresentationActor>> VisualPool;

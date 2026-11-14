@@ -20,6 +20,8 @@
 #include "Creature/Player/EcoPlayerEcologyComponent.h"
 #include "Creature/Runtime/EcoCreatureIntegrationSpawner.h"
 #include "Player/EcoPlayerState.h"
+#include "Player/EcoHandFoodComponent.h"
+#include "World/EcoWorldClockSubsystem.h"
 #include "AI/Social/Senses/EcoNoiseSubsystem.h"
 #include "GameFramework/Pawn.h"
 #include "EngineUtils.h"
@@ -31,9 +33,19 @@
 #include "World/EcologyWorldSubsystem.h"
 #include "World/EcologyRegion.h"
 #include "EcoLifeLocomotion.h"
+#include "HAL/FileManager.h"
+#include "Misc/FileHelper.h"
+#include "Misc/Paths.h"
+#include "ProfilingDebugging/CpuProfilerTrace.h"
+#include "ProfilingDebugging/MiscTrace.h"
 
 namespace EcoPolicyV3IntegratedProcImpl
 {
+	constexpr int32 MotionCaptureSteps = 225;
+	TAutoConsoleVariable<FString> CVarMotionAgent(
+		TEXT("eco.MoveTrace.Agent"), TEXT("0"),
+		TEXT("Capture one integrated v3 deer by StableAgentId for 225 logical steps. 0 stops and saves; set 0 before capturing the same ID again."));
+
 	struct FMoveAdapter
 	{
 		const UEcoPolicyV3IntegratedSubsystem* Sub = nullptr;
@@ -60,6 +72,102 @@ namespace EcoPolicyV3IntegratedProcImpl
         const auto& A=*static_cast<const FMoveAdapter*>(User);
         if(!A.Rows||!A.Rows->IsValidIndex(Index)||!A.Deer)return false;
         const auto* J=(*A.Deer)[(*A.Rows)[Index]].Journey;return J&&(J->bActive||J->bStranded);
+    }
+
+    double HandFeedHook(void* User, int32 Index, const EcoWorldV3::FHerbView& Herb, bool bCaught, double Appetite)
+    {
+        const auto& A = *static_cast<FMoveAdapter*>(User);
+        const auto& Deer = (*A.Deer)[(*A.Rows)[Index]];
+        Deer.Int->LastHandFeedIntake = 0;
+        if (!A.Combat->HasHandFeedFor(Deer.Id))
+            return 0;
+        const auto* Profile = A.Combat->FindPlayerInteractionProfile(Deer.SpeciesId);
+        const FVector Body = A.Ctx->UnitsToCm(Herb.Body->Pos.X, Herb.Body->Pos.Y, Deer.Int->GroundZ);
+        FVector Mouth = Body;
+        if (Profile)
+        {
+            const FVector Head = FVector(Herb.Body->Head.X, Herb.Body->Head.Y, 0).GetSafeNormal2D();
+            Mouth += Head * Profile->MouthOffsetCm.X + FVector(-Head.Y, Head.X, 0) * Profile->MouthOffsetCm.Y
+                + FVector(0, 0, Profile->MouthOffsetCm.Z);
+        }
+        const bool bSafe = !bCaught && !Traveling(User, Index) && Herb.Rep->Behavior == EcoRepertoireV3::kGraze
+            && Herb.Decision->KeepActive == EcoWorldV3::kKeepNone && !Herb.Control->bCrouch
+            && Herb.Perception->Threat.PredCount == 0;
+        Deer.Int->LastHandFeedIntake = A.Combat->ConsumeHandFeed(Deer.Id, Deer.Region, Deer.SpeciesId, *A.Ctx, Body, Mouth, bSafe, Appetite);
+        return Deer.Int->LastHandFeedIntake;
+    }
+
+    void BuildPlayerInteractionEvidence(const FMoveAdapter& Adapter, const FEcoV3DeerRec& Deer,
+        const TArray<APawn*>& Players, int64 Step)
+    {
+        auto& Link = *Deer.Int;
+        Link.VisibleInteractionCount = 0;
+        Link.InteractionEvidenceStep = Step;
+        const auto* Profile = Adapter.Combat->FindPlayerInteractionProfile(Deer.SpeciesId);
+        const auto& Ctx = *Adapter.Ctx;
+        if (!Profile || Ctx.RegionId != Deer.Region || Link.bDead || Deer.Vitals->HP <= 0
+            || Deer.View.Body->DeathCause != EcoWorldV3::kDeathNone || Deer.View.Rep->Behavior == EcoRepertoireV3::kSleep)
+            return;
+
+        FEcoRegionalHumanReputation Reputation;
+        const bool bReputationKnown = Adapter.Combat->ReadRegionalHumanReputation(Deer.Region, Deer.SpeciesId, Reputation);
+        const auto& Body = *Deer.View.Body;
+        const FVector Origin = Ctx.UnitsToCm(Body.Pos.X, Body.Pos.Y, Link.GroundZ);
+        const FVector Eye = Origin + FVector(0, 0, Profile->EyeHeightCm);
+        const FVector Head(Body.Head.X, Body.Head.Y, 0);
+        const double Range = FMath::Min(Profile->SightRangeCm, EcoWorldV3::SeePredNow(Ctx.Sim) * EcoRepertoireV3::kUnitCm);
+        const auto CanSee = [&](const FVector& Point)
+        {
+            const FVector Direction = (Point - Eye).GetSafeNormal2D();
+            const auto Local = Ctx.CmToUnits(Point);
+            return FVector::DistSquared(Eye, Point) <= FMath::Square(Range)
+                && (Direction.IsNearlyZero() || FVector::DotProduct(Direction, Head) >= Ctx.Sim.ObsCfg.ThreatFovCos)
+                && !Ctx.Sim.Food.BlocksSight(Body.Pos.X, Body.Pos.Y, Local.X, Local.Y)
+                && !Adapter.Sub->GetWorld()->LineTraceTestByObjectType(Eye, Point, FCollisionObjectQueryParams(ECC_WorldStatic),
+                    FCollisionQueryParams(SCENE_QUERY_STAT(EcoPlayerInteractionSight), false));
+        };
+        for (const auto* Pawn : Players)
+        {
+            const auto* State = Pawn->GetPlayerState<AEcoPlayerState>();
+            if (!State || !State->IsAlive())
+                continue;
+            FVector PlayerEye;
+            FRotator EyeRotation;
+            Pawn->GetActorEyesViewPoint(PlayerEye, EyeRotation);
+            const FVector Relative = (Pawn->GetActorLocation() - Origin) / EcoRepertoireV3::kUnitCm;
+            int32 Rank = 0;
+            while (Rank < Link.VisibleInteractionCount)
+            {
+                const auto& Prior = Link.VisibleInteractions[Rank];
+                if (Relative.SizeSquared() < Prior.RelativePositionUnits.SizeSquared()
+                    || (Relative.SizeSquared() == Prior.RelativePositionUnits.SizeSquared() && State->GetPlayerId() < Prior.PlayerId))
+                    break;
+                ++Rank;
+            }
+            if (Rank >= Link.MaxInteractionCandidates || !CanSee(PlayerEye))
+                continue;
+            Link.VisibleInteractionCount = FMath::Min(Link.VisibleInteractionCount + 1, Link.MaxInteractionCandidates);
+            for (int32 Index = Link.VisibleInteractionCount - 1; Index > Rank; --Index)
+                Link.VisibleInteractions[Index] = Link.VisibleInteractions[Index - 1];
+            auto& Evidence = Link.VisibleInteractions[Rank];
+            Evidence = {};
+            Evidence.PlayerId = State->GetPlayerId();
+            Evidence.AvatarGeneration = State->AvatarGeneration;
+            Evidence.RelativePositionUnits = Relative;
+            Evidence.VelocityUnitsPerStep = Pawn->GetVelocity() * (EcoRepertoireV3::kStepSeconds / EcoRepertoireV3::kUnitCm);
+            Evidence.bReputationKnown = bReputationKnown;
+            Evidence.Reputation = Reputation;
+            if (const auto* Food = Pawn->FindComponentByClass<UEcoHandFoodComponent>())
+            {
+                const FVector Hand = Food->GetHandAnchor();
+                Evidence.bHandKnown = CanSee(Hand);
+                if (Evidence.bHandKnown && Food->CanOffer())
+                {
+                    Evidence.VisibleFoodId = Food->GetHeldFood()->FoodId;
+                    Evidence.RelativeFoodPositionUnits = (Hand - Origin) / EcoRepertoireV3::kUnitCm;
+                }
+            }
+        }
     }
     void JourneyControlHook(void* User,int32 Index,const EcoWorldV3::FHerbView& H){
         const auto& A=*static_cast<const FMoveAdapter*>(User);
@@ -469,6 +577,7 @@ namespace EcoPolicyV3IntegratedProcImpl
     }
 
     void IntegratedControlHook(void* User,int32 Index,const EcoWorldV3::FHerbView& H){
+        TRACE_CPUPROFILER_EVENT_SCOPE(EcoV3_IntegratedHerbControl);
         const auto& A=*static_cast<const FMoveAdapter*>(User);
         if(Traveling(User,Index))JourneyControlHook(User,Index,H);
         else if(A.Sub->GetSettings().bSocialControl)SocialControlHook(User,Index,H);
@@ -670,6 +779,7 @@ namespace EcoPolicyV3IntegratedProcImpl
 
 	bool HerbMoveHook(void* User, int32 Index, const EcoWorldV3::FVec2& From, const EcoWorldV3::FVec2& To)
 	{
+		TRACE_CPUPROFILER_EVENT_SCOPE(EcoV3_HerbMoveValidation);
 		const FMoveAdapter& A = *static_cast<const FMoveAdapter*>(User);
 		if (!A.HerbInts || !A.HerbInts->IsValidIndex(Index))
 		{
@@ -687,6 +797,7 @@ namespace EcoPolicyV3IntegratedProcImpl
 
 	bool ThreatMoveHook(void* User, int32 Index, double FromX, double FromY, double ToX, double ToY)
 	{
+		TRACE_CPUPROFILER_EVENT_SCOPE(EcoV3_ThreatMoveValidation);
 		const FMoveAdapter& A = *static_cast<const FMoveAdapter*>(User);
 		if (!A.WolfInts || !A.WolfInts->IsValidIndex(Index))
 		{
@@ -885,9 +996,43 @@ void UEcoPolicyV3IntegratedStepProcessor::ConfigureQueries(const TSharedRef<FMas
 	WolfQuery.AddTagRequirement<FEcoClientProxyTag>(EMassFragmentPresence::None);
 }
 
+void UEcoPolicyV3IntegratedStepProcessor::FinishMotionCapture(const UWorld& World)
+{
+	MotionStepsRemaining = 0;
+	TRACE_BOOKMARK(TEXT("EcoMotionEnd %s ID=%lld"), *World.GetName(), RequestedMotionAgent);
+	if (MotionRows.IsEmpty())
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[EcoMotion] No v3 deer samples for ID=%lld in %s."), RequestedMotionAgent, *World.GetName());
+		return;
+	}
+
+	const FString Directory = FPaths::ProjectSavedDir() / TEXT("Profiling/EcoMovement");
+	IFileManager::Get().MakeDirectory(*Directory, true);
+	const FString Path = Directory / FString::Printf(TEXT("Deer_%lld_%s.csv"), RequestedMotionAgent, *FGuid::NewGuid().ToString(EGuidFormats::Digits));
+	FString Csv = TEXT("world,region,brain,agent_id,global_step,region_step,food_before,food_ok,")
+		TEXT("pred_count_before,keep_before,request,policy_read,route_read,behavior,seq,lock_left,startle_left,keep_applied,route_applied,")
+		TEXT("pre_hook_gait,pre_hook_dx,pre_hook_dy,final_gait,final_dx,final_dy,actual_dx,actual_dy,")
+		TEXT("rejected_move_attempts,intake,death_cause,pred_count_after,keep_next,request_next\n");
+	for (const FString& Row : MotionRows)
+	{
+		Csv += Row;
+	}
+	const bool bSaved = FFileHelper::SaveStringToFile(Csv, *Path, FFileHelper::EEncodingOptions::ForceUTF8);
+	if (bSaved)
+	{
+		UE_LOG(LogTemp, Display, TEXT("[EcoMotion] Saved %d samples: %s"), MotionRows.Num(), *FPaths::ConvertRelativePathToFull(Path));
+	}
+	else
+	{
+		UE_LOG(LogTemp, Error, TEXT("[EcoMotion] Could not write %s"), *Path);
+	}
+	MotionRows.Reset();
+}
+
 void UEcoPolicyV3IntegratedStepProcessor::Execute(FMassEntityManager& EntityManager, FMassExecutionContext& Context)
 {
 	using namespace EcoPolicyV3IntegratedProcImpl;
+	TRACE_CPUPROFILER_EVENT_SCOPE(EcoV3_IntegratedProcessor);
 	UWorld* World = GetWorld();
 	UEcoPolicyV3IntegratedSubsystem* Sub = World ? World->GetSubsystem<UEcoPolicyV3IntegratedSubsystem>() : nullptr;
 	if (!Sub || !Sub->IsActive())
@@ -901,6 +1046,26 @@ void UEcoPolicyV3IntegratedStepProcessor::Execute(FMassEntityManager& EntityMana
 	{
 		return;
 	}
+	int64 MotionAgent = 0;
+	if (!LexTryParseString(MotionAgent, *CVarMotionAgent.GetValueOnGameThread()) || MotionAgent < 0)
+	{
+		MotionAgent = 0;
+	}
+	if (MotionAgent != RequestedMotionAgent)
+	{
+		if (MotionStepsRemaining > 0)
+		{
+			FinishMotionCapture(*World);
+		}
+		RequestedMotionAgent = MotionAgent;
+		if (MotionAgent > 0)
+		{
+			MotionRows.Reset(MotionCaptureSteps);
+			MotionStepsRemaining = MotionCaptureSteps;
+			TRACE_BOOKMARK(TEXT("EcoMotionBegin %s ID=%lld"), *World->GetName(), MotionAgent);
+			UE_LOG(LogTemp, Display, TEXT("[EcoMotion] Capturing ID=%lld in %s for up to %d steps."), MotionAgent, *World->GetName(), MotionCaptureSteps);
+		}
+	}
 	// 두뇌 바꾸기 (10-18, EcoV3Brain.h): 결정 스텝 경계 — 콘솔·폴더 감시·시작 두뇌로 대기 중인 두뇌를 여기서 바꾼다 (입양 첫 결정 앞)
 	Sub->SyncBrain(/*bPollWatch*/ true);
 
@@ -909,6 +1074,7 @@ void UEcoPolicyV3IntegratedStepProcessor::Execute(FMassEntityManager& EntityMana
 	Wolves.Reset();
 	DeerQuery.ForEachEntityChunk(Context, [this](FMassExecutionContext& Ctx)
 	{
+		TRACE_CPUPROFILER_EVENT_SCOPE(EcoV3_GatherDeerChunk);
 		const TConstArrayView<FEcoIdentityFragment> Ids = Ctx.GetFragmentView<FEcoIdentityFragment>();
         const auto Requests=Ctx.GetFragmentView<FEcoSocialMovementRequestFragment>();
         const auto Alarms=Ctx.GetFragmentView<FEcoAlarmStateFragment>();
@@ -935,6 +1101,7 @@ void UEcoPolicyV3IntegratedStepProcessor::Execute(FMassEntityManager& EntityMana
 			FEcoV3DeerRec& R = Deer.AddDefaulted_GetRef();
 			R.Id = Ids[i].StableAgentId;
 			R.Region = Regions[i].CurrentRegionId;
+			R.SpeciesId = Ids[i].SpeciesId;
 			R.Transform = &Xfs[i];
 			R.Vitals = &Vits[i];
 			R.Death = Deaths.IsEmpty() ? nullptr : &Deaths[i];
@@ -955,6 +1122,7 @@ void UEcoPolicyV3IntegratedStepProcessor::Execute(FMassEntityManager& EntityMana
 	});
 	WolfQuery.ForEachEntityChunk(Context, [this](FMassExecutionContext& Ctx)
 	{
+		TRACE_CPUPROFILER_EVENT_SCOPE(EcoV3_GatherWolfChunk);
 		const TConstArrayView<FEcoIdentityFragment> Ids = Ctx.GetFragmentView<FEcoIdentityFragment>();
 		const TConstArrayView<FEcoRegionFragment> Regions = Ctx.GetFragmentView<FEcoRegionFragment>();
 		const TConstArrayView<FTransformFragment> Xfs = Ctx.GetFragmentView<FTransformFragment>();
@@ -981,8 +1149,11 @@ void UEcoPolicyV3IntegratedStepProcessor::Execute(FMassEntityManager& EntityMana
             R.Vitals=&Vits[i];R.Death=Deaths.IsEmpty()?nullptr:&Deaths[i];
 		}
 	});
-	Deer.Sort([](const FEcoV3DeerRec& A, const FEcoV3DeerRec& B) { return A.Id < B.Id; });
-	Wolves.Sort([](const FEcoV3WolfRec& A, const FEcoV3WolfRec& B) { return A.Id < B.Id; });
+	{
+		TRACE_CPUPROFILER_EVENT_SCOPE(EcoV3_SortByAgentId);
+		Deer.Sort([](const FEcoV3DeerRec& A, const FEcoV3DeerRec& B) { return A.Id < B.Id; });
+		Wolves.Sort([](const FEcoV3WolfRec& A, const FEcoV3WolfRec& B) { return A.Id < B.Id; });
+	}
 
 	// --- 2. 지역별 목록 ---
 	DeerByContext.SetNum(NumCtx);
@@ -1020,6 +1191,7 @@ void UEcoPolicyV3IntegratedStepProcessor::Execute(FMassEntityManager& EntityMana
     TArray<int64> StableViewIds;
 	auto BuildViews = [this,&StableViewIds](int32 c)
 	{
+		TRACE_CPUPROFILER_EVENT_SCOPE(EcoV3_BuildRegionViews);
 		Views.Reset();StableViewIds.Reset();
 		HerbInts.Reset();
 		ThreatPtrs.Reset();
@@ -1041,6 +1213,10 @@ void UEcoPolicyV3IntegratedStepProcessor::Execute(FMassEntityManager& EntityMana
     AEcoCreatureIntegrationSpawner* CombatOwner=nullptr;
     for(TActorIterator<AEcoCreatureIntegrationSpawner> It(World);It;++It)
         if(It->bUseV3Policy && It->bEnableEcosystemLife && It->IsRuntimeReady()) { CombatOwner=*It; break; }
+    const bool bPlayerInteraction = CombatOwner && CombatOwner->IsPlayerInteractionEnabled();
+    const auto* InteractionClock = bPlayerInteraction ? World->GetSubsystem<UEcoWorldClockSubsystem>() : nullptr;
+    TArray<TArray<APawn*>> InteractionPlayers;
+    if (bPlayerInteraction) InteractionPlayers.SetNum(NumCtx);
     TArray<FEcoNoiseEvent> RecentNoises;
     if(auto* Noise=World->GetSubsystem<UEcoNoiseSubsystem>())Noise->GatherRecent(RecentNoises);
     for(int32 c=0;c<NumCtx;++c) {
@@ -1061,6 +1237,11 @@ void UEcoPolicyV3IntegratedStepProcessor::Execute(FMassEntityManager& EntityMana
             Region.PlayerSamples.push_back({P.X,P.Y,V.X,V.Y,false});
             FVector Eye;FRotator EyeRotation;Player->GetActorEyesViewPoint(Eye,EyeRotation);Region.PlayerEyeZ.Add(Eye.Z);
             if(!Region.Sim.Config.bEcosystemLife)Region.Sim.ExternalThreats.push_back(Region.PlayerSamples.back());
+        }
+        if (bPlayerInteraction)
+        {
+            Players.SetNum(FMath::Min(Players.Num(), int32(Region.PlayerSamples.size())));
+            InteractionPlayers[c] = MoveTemp(Players);
         }
         if(Region.Sim.Config.bEcosystemLife)for(int32 K=RecentNoises.Num()-1;K>=0&&Region.PlayerNoises.Num()<16;--K){
             const auto& Noise=RecentNoises[K];const auto* Pawn=Cast<APawn>(Noise.Instigator.Get());
@@ -1140,6 +1321,7 @@ void UEcoPolicyV3IntegratedStepProcessor::Execute(FMassEntityManager& EntityMana
 	const double CpuStart = FPlatformTime::Seconds();
 	for (int32 s = 0; s < Steps; ++s)
 	{
+		TRACE_CPUPROFILER_EVENT_SCOPE(EcoV3_GlobalStep);
 		// 숲 자람 모드 (10-27, EcoV3ForestGrowth.cpp): 다 자랄 단계면 이 정확한 스텝에서 줄기 막이를 켜고 나무만 다시 읽는다 — 바로 아래 ApplyEnvChange 가 넣는다
 		// (실시간 읽기 주기·프레임 나눔과 무관). 숲을 끄면 아무것도 하지 않는다
 		Sub->ForestStepBoundary();
@@ -1171,6 +1353,8 @@ void UEcoPolicyV3IntegratedStepProcessor::Execute(FMassEntityManager& EntityMana
 		// 자동·주기 스냅숏 (10-21): 환경 판이 가라앉은 뒤 판마다 한 번, eco.IntegratedV3.SnapshotEvery 주기 (읽기만)
 		Sub->MaybeAutoSnapshot();
 		const EcoPolicyV3::FPolicyNetV3& Net = Sub->ActiveNet();
+		if (InteractionClock)
+			CombatOwner->CancelInvalidHandFeeds(InteractionClock->GetServerTime().WorldEpoch, Sub->GetGlobalStep());
 		for (int32 c = 0; c < NumCtx; ++c)
 		{
 			FEcoV3RegionContext& Ctx = *Sub->GetContext(c);
@@ -1224,6 +1408,7 @@ void UEcoPolicyV3IntegratedStepProcessor::Execute(FMassEntityManager& EntityMana
             Adapter.HerbIds=&StableViewIds;Adapter.WolfKeys=&WolfIds;
             Hooks.ThreatInput=&EvidenceThreatHook;
             Hooks.HerbTravel = &Traveling;
+            if (bPlayerInteraction) Hooks.HerbHandFeed = &HandFeedHook;
             Hooks.HerbMove = Sub->UsesTerrain() ? &HerbMoveHook : nullptr;
             Hooks.ThreatMove = Sub->UsesTerrain() ? &ThreatMoveHook : nullptr;
 			const double BeforeFood = Ctx.Sim.Food.Total();
@@ -1233,8 +1418,48 @@ void UEcoPolicyV3IntegratedStepProcessor::Execute(FMassEntityManager& EntityMana
 			// 10-24 두 길 두뇌 (기록만): 이 스텝에 실행한 반사 길 RUN·SHELTER 사슴-스텝 = 세계 길 통계의 스텝 차 (길 끔이면 늘 0)
 			const int64 RouteRun0 = Ctx.Sim.Stats.Route.Steps[EcoWorldV3::kRouteRun];
 			const int64 RouteShelter0 = Ctx.Sim.Stats.Route.Steps[EcoWorldV3::kRouteShelter];
-			const EcoWorldV3::FStepReport Report = EcoWorldV3::Step(Ctx.Sim, Views.GetData(), Views.Num(), ThreatPtrs.GetData(),
-																	ThreatPtrs.Num(), Net, &Hooks);
+			EcoWorldV3::FHerbMotionSample Sample;
+			const int64 RegionStep = Ctx.Sim.T;
+			double FoodBefore = 0;
+			int32 PredBefore = 0, KeepBefore = 0, BlockedBefore = 0;
+			if (MotionStepsRemaining > 0)
+			{
+				Sample.Row = StableViewIds.IndexOfByKey(RequestedMotionAgent);
+				if (Sample.Row != INDEX_NONE)
+				{
+					const auto& H = Views[Sample.Row];
+					FoodBefore = Ctx.Sim.Food.FoodAt(H.Body->Pos);
+					PredBefore = H.Perception->Threat.PredCount;
+					KeepBefore = H.Decision->KeepMode;
+					BlockedBefore = HerbInts[Sample.Row]->BlockedMoves;
+					Hooks.MotionSample = &Sample;
+				}
+			}
+
+			EcoWorldV3::FStepReport Report;
+			{
+				TRACE_CPUPROFILER_EVENT_SCOPE(EcoV3_NativeRegionStep);
+				Report = EcoWorldV3::Step(Ctx.Sim, Views.GetData(), Views.Num(), ThreatPtrs.GetData(), ThreatPtrs.Num(), Net, &Hooks);
+			}
+			if (bPlayerInteraction)
+				for (const int32 Row : DeerByContext[c])
+					BuildPlayerInteractionEvidence(Adapter, Deer[Row], InteractionPlayers[c], RegionStep);
+			if (Hooks.MotionSample)
+			{
+				const auto& H = Views[Sample.Row];
+				const auto& D = *H.Decision;
+				const bool bFoodOk = EcoRepertoireV3::IsFoodOk(FoodBefore, Ctx.Sim.RepCfg);
+				FString Row = FString::Printf(TEXT("\"%s\",\"%s\",\"%s\",%lld,%lld,%lld,%.9g,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"),
+					*World->GetName(), *Ctx.RegionId.ToString(), *Sub->GetActiveBrain().Id, RequestedMotionAgent, Sub->GetGlobalStep(), RegionStep,
+					FoodBefore, int32(bFoodOk), PredBefore, KeepBefore, Sample.Request, int32(Sample.bPolicyRead), int32(Sample.bRouteRead),
+					Sample.Behavior, Sample.Seq, Sample.LockLeft, Sample.StartleLeft, Sample.Keep, Sample.Route);
+				Row += FString::Printf(TEXT("%d,%.9g,%.9g,%d,%.9g,%.9g,%.9g,%.9g,%d,%.9g,%d,%d,%d,%d\n"),
+					Sample.BeforeHook.Gait, Sample.BeforeHook.Velocity.X, Sample.BeforeHook.Velocity.Y,
+					Sample.FinalControl.Gait, Sample.FinalControl.Velocity.X, Sample.FinalControl.Velocity.Y,
+					Sample.ActualMove.X, Sample.ActualMove.Y, HerbInts[Sample.Row]->BlockedMoves - BlockedBefore,
+					H.Body->LastIntake, H.Body->DeathCause, H.Perception->Threat.PredCount, D.KeepMode, D.Request);
+				MotionRows.Add(MoveTemp(Row));
+			}
 			{
 				const int64 RunD = Ctx.Sim.Stats.Route.Steps[EcoWorldV3::kRouteRun] - RouteRun0;
 				const int64 ShelterD = Ctx.Sim.Stats.Route.Steps[EcoWorldV3::kRouteShelter] - RouteShelter0;
@@ -1369,6 +1594,10 @@ void UEcoPolicyV3IntegratedStepProcessor::Execute(FMassEntityManager& EntityMana
             }
 		}
 		Sub->FinishGlobalStep();
+		if (MotionStepsRemaining > 0 && --MotionStepsRemaining == 0)
+		{
+			FinishMotionCapture(*World);
+		}
 	}
 	if (Steps > 0)
 	{
@@ -1453,6 +1682,7 @@ void UEcoPolicyV3IntegratedVisualProcessor::ConfigureQueries(const TSharedRef<FM
 
 void UEcoPolicyV3IntegratedVisualProcessor::Execute(FMassEntityManager& EntityManager, FMassExecutionContext& Context)
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(EcoV3_VisualSync);
 	UWorld* World = GetWorld();
 	UEcoPolicyV3IntegratedSubsystem* Sub = World ? World->GetSubsystem<UEcoPolicyV3IntegratedSubsystem>() : nullptr;
 	if (!Sub || !Sub->IsActive() || Sub->NumContexts() == 0)

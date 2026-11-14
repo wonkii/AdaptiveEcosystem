@@ -145,6 +145,7 @@ struct FEcoEcosystemCheckpoint
         using namespace EcoCheckpoint;
         auto Reject=[&](const TCHAR* Reason){UE_LOG(LogTemp,Warning,TEXT("[EcoCheckpoint] %s rejected: %s"),Loading?TEXT("Load"):TEXT("Save"),Reason);return false;};
         const FString File=Path(Slot);
+        if (!S.PlayerInteractionProfiles.IsEmpty()) return Reject(TEXT("player hand food and regional human reputation are session state"));
         if(File.IsEmpty()||!IsInGameThread()||S.GetNetMode()==NM_Client||!S.bReady||!S.bEnableEcosystemLife||S.bEnableWaves)return Reject(TEXT("authority, ready life-v1 world and valid local slot required; waves unsupported"));
         auto* W=S.GetWorld();auto* M=W->GetSubsystem<UMassSpawnerSubsystem>();auto* E=W->GetSubsystem<UEcologySimulationSubsystem>();
         auto* N=W->GetSubsystem<UEcoPolicyV3IntegratedSubsystem>();auto* Clock=W->GetSubsystem<UEcoWorldClockSubsystem>();

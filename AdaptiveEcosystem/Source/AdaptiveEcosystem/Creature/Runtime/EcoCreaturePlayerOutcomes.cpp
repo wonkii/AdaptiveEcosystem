@@ -13,11 +13,14 @@
 #include "Player/EcoPlayerState.h"
 #include "Player/EcoMeleeHitComponent.h"
 #include "Player/EcoCombatRelevanceComponent.h"
+#include "Player/EcoHandFoodComponent.h"
+#include "Ecology/EcologySimulationSubsystem.h"
 
 bool AEcoCreatureIntegrationSpawner::QueuePlayerStrike(APawn& Player)
 {
     if(!IsInGameThread()||GetNetMode()==NM_Client||!bEnableEcosystemLife||!bReady||Player.GetWorld()!=GetWorld()
-        ||!Player.HasAuthority()||!Player.IsPlayerControlled()||PlayerStrikes.Num()>=32)return false;
+        ||!Player.HasAuthority()||!Player.IsPlayerControlled()||PlayerStrikes.Num()>=32
+        ||UEcoHandFoodComponent::ActorIsHoldingFood(&Player))return false;
     if (const auto* State=Player.GetPlayerState<AEcoPlayerState>();State&&!State->IsAlive()) return false;
     if (const auto* Hit=Player.FindComponentByClass<UEcoMeleeHitComponent>();Hit&&Hit->AttackData) return false;
     const double Now=GetWorld()->GetSubsystem<UEcoWorldClockSubsystem>()->GetServerTime().ServerTimeSeconds;
@@ -40,7 +43,8 @@ void AEcoCreatureIntegrationSpawner::ProcessPlayerStrikes(const FEcoServerTimeSn
     auto ClearLine=[&](const FVector& A,const FVector& B){return !GetWorld()->LineTraceTestByObjectType(A,B,FCollisionObjectQueryParams(ECC_WorldStatic),FCollisionQueryParams(SCENE_QUERY_STAT(EcoPlayerStrike),false));};
     for(int32 I=PlayerStrikes.Num()-1;I>=0;--I){
         const auto Request=PlayerStrikes[I];if(Time.ServerTimeSeconds+1e-6<Request.Issued)continue;PlayerStrikes.RemoveAtSwap(I);
-        auto* Player=Request.Player.Get();if(!Player||!Player->HasAuthority()||!Player->IsPlayerControlled()||Time.ServerTimeSeconds-Request.Issued>3)continue;
+        auto* Player=Request.Player.Get();if(!Player||!Player->HasAuthority()||!Player->IsPlayerControlled()
+            ||UEcoHandFoodComponent::ActorIsHoldingFood(Player)||Time.ServerTimeSeconds-Request.Issued>3)continue;
         const FVector From=Player->GetActorLocation();const FVector Forward=Player->GetActorForwardVector().GetSafeNormal2D();
         FVector PlayerEye;FRotator PlayerEyeRotation;Player->GetActorEyesViewPoint(PlayerEye,PlayerEyeRotation);
         FMassEntityHandle Best;double Distance=300;
@@ -113,7 +117,32 @@ void AEcoCreatureIntegrationSpawner::ApplyPlayerDamage(APawn& Attacker, FMassEnt
         Memory.Suffer(Episode,Now,Known,PlayerLocal.X,PlayerLocal.Y,Known&&Memory.LastKind==EcoLifeV3::EEncounter::Pursuit);
         if(Known&&Context->Sim.Food.Vegetation.bHabitatDynamics)
             Memory.RememberHunt(From.X/EcoRepertoireV3::kUnitCm,From.Y/EcoRepertoireV3::kUnitCm,Now);
-        auto& Vitals=EM.GetFragmentDataChecked<FEcoVitalsFragment>(Best);Vitals.HP=FMath::Max(0.f,Vitals.HP-Damage);
+        auto& Vitals=EM.GetFragmentDataChecked<FEcoVitalsFragment>(Best);
+        const float BeforeHP = Vitals.HP;
+        Vitals.HP=FMath::Max(0.f,Vitals.HP-Damage);
+        if (BeforeHP > Vitals.HP && !HandFeedRequests.IsEmpty())
+            CancelHandFeedTarget(EM.GetFragmentDataChecked<FEcoIdentityFragment>(Best).StableAgentId, Native->GetGlobalStep());
+        if (Known && BeforeHP > Vitals.HP && Vitals.MaxHP > 0 && IsPlayerInteractionEnabled())
+        {
+            const auto& Identity = EM.GetFragmentDataChecked<FEcoIdentityFragment>(Best);
+            const FName RegionId = EM.GetFragmentDataChecked<FEcoRegionFragment>(Best).CurrentRegionId;
+            const auto* Profile = FindPlayerInteractionProfile(Identity.SpeciesId);
+            auto* Ecology = GetWorld()->GetSubsystem<UEcologySimulationSubsystem>();
+            const auto* Clock = GetWorld()->GetSubsystem<UEcoWorldClockSubsystem>();
+            FEcoRegionalHumanReputation Reputation;
+            double Delta = 0;
+            const double Applied = BeforeHP - Vitals.HP;
+            const int64 NativeStep = Native->GetGlobalStep();
+            const int32 Epoch = Clock ? Clock->GetServerTime().WorldEpoch : 0;
+            if (Profile && Ecology && Clock && Context->RegionId == RegionId
+                && Ecology->RecordHumanReputation(Epoch, RegionId, Identity.SpeciesId,
+                    *Profile, NativeStep, Applied / Vitals.MaxHP, Reputation, Delta))
+            {
+                UE_LOG(LogTemp, Log, TEXT("[EcoHumanReputation] Epoch=%d Step=%lld Agent=%lld Source=%s Region=%s Species=%s Damage=%.2f Score=%.2f Delta=%.2f Revision=%lld"),
+                    Epoch, NativeStep, Identity.StableAgentId, *GetNameSafe(Player), *RegionId.ToString(),
+                    *Identity.SpeciesId.ToString(), Applied, Reputation.Score, Delta, Reputation.Revision);
+            }
+        }
         if(Vitals.HP<=0)
         {
             EM.GetFragmentDataChecked<FEcoDeathFragment>(Best).Cause=EEcoDeathCause::ExternalDamage;

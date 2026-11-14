@@ -1,5 +1,17 @@
 # 프로젝트 공통 맥락과 작업 시작 안내
 
+손 먹이·공통 평판 게임 코드 후속(2026-11-14): [에디터 설정과 수동 검증](Player/HAND_FOOD_EDITOR_SETUP_20261114.md)을 따른다. PlayerState 수량, 오른손 장착 컴포넌트, Native C4 한입, 권위 지역·종 평판, 피해 및 시각 증거를 연결했다. 레벨의 Player Interaction Profiles와 Blueprint 입력을 설정해 활성화한다. 학습 담당 인계용 C++ 자료형과 출력 로그를 제공하며 엔진 검증 상태는 설정 문서에 기록한다.
+
+플레이어 상호작용 계획(2026-11-14 후속): [손 먹이·지역 종별 인간 공통 평판 명세](Architecture/PLAYER_HELD_FOOD_AFFINITY_SPEC_20261114.md), [구현 계획](Architecture/PLAYER_HELD_FOOD_AFFINITY_PLAN_20261114.md), [Python 담당자 단계별 인수인계](RL_Policy/PLAYER_INTERACTION_RL_HANDOFF_20261114.md)를 따른다. 최신 결정은 **지역×종별로 모든 플레이어에게 적용되는 공통 평판**이다. key는 `(WorldEpoch, RegionId, SpeciesId)`이며 A의 급여/인식된 피해가 B와 신규 접속자에 대한 평판에도 반영된다. 다른 지역·종은 독립이다. 종별 설정을 분리하고 첫 실행은 사슴만 활성화한다. **숫자1 키로 오른손 Socket에 기본 Sphere 먹이를 장착**하며 실제 급여는 별도 입력이다. 지면 배치형·개인 사슴별·플레이어별 평판(v2)은 대체됐다. 평판 공유와 직접 위험 기억/숨은 위치 공유를 구분하고 기존 Native 단일 writer/RL 경계를 유지한다. 활성 규칙판은 `held_food_regional_species_human_reputation_v3`다. G_GAME은 실행 기반 인계, G_TRAIN은 RL 환경·정책 연결 완료다. **아래 문서는 계획 이력이며 현재 구현과 검증 범위는 위 에디터 안내 및 Python 인수인계에서 확인한다.**
+
+조향·회피 통합 후속(2026-11-12): [단계별 계획과 개발 명세](Performance/MassMovement/09_AVOIDANCE_INTEGRATION_SPEC_20261112.md)는 기존 MoveTrace 원인 판별→정확 탐색·B/C1 경계→사슴 회피 shadow/opt-in→늑대 포획 관계·통로→연결별 전송/표현의 순서와 완료 조건을 제공한다. 현재 8/60초 Native step과 RL 판단 계약, 단일 writer를 기준으로 한다. 이번 작업은 문서 작성이며 새 빌드·PIE·성능 결과는 없다.
+
+RL 판단 보존 성능 계획(2026-11-12): [Epic Mass 여섯 비교 지점 개발 명세](Performance/MassMovement/RL_PRESERVING_EPIC_MASS_PLAN_20261112.md)는 현재 Source·설치 UE5.8.3·Epic 공식 문서를 대조하여 실행 단위/스레드/이웃/조향/주기/표현을 구분한다. 정확 후보 순회·순수 단계 분리·표현 개선을 우선하며, 기존 정책 관측/판단 주기와 Native 단일 writer를 보존한다. 회피 동작 변경은 shadow→호환성/품질 검증→opt-in으로 다룬다. 문서만 작성했으며 새 구현·빌드·성능 결과는 없다.
+
+Epic Mass 참고 이동 개선(2026-11-10): [기능별 개발 시작점](Performance/MassMovement/README.md)에서 이웃 탐색·회피, 조향·이주, 다지역 실행, LOD·사건 처리, 검증 명세와 공식 참고자료를 읽는다. 기존 동족 명세 P0/P1을 첫 단계로 유지하고 제한 이웃은 shadow→RL 계약→opt-in 순서로 다룬다. 이번에는 문서만 작성했으며 기존 기능 활성화·코드·성능 결과를 변경하지 않았다.
+
+밀집 무리 탐색 후속 명세(2026-11-10): [동족 탐색 개선 개발 명세](Performance/BOUNDED_NEIGHBOR_SEARCH_SPEC_20261110.md)는 지역당1,024마리·다지역을 위한 후보 순회 개선과 제한된 이웃/사건 기반 처리의 계약 단계를 구분한다. 다음 공간 탐색 구현은 P0 계측·소비자 감사와 P1 정확한 후보 순회 비교부터 시작한다. 문서만 작성했으며 관측·모델·조향 변경이나 새 성능 검증은 없다.
+
 PR #16 → JWJ 통합(2026-11-09~10): [충돌 해결·보존 기준·검증](Team/PR16_JWJ_MERGE_20261109.md)을 따른다. 자연 서식지/다종 기능과 JWJ 공유 풀 S1/지역 순차 이주를 함께 유지한다. 양쪽 저장 payload를 합친 현재 포맷은 **5**이며 아래 v2/v4 설명은 각 브랜치의 통합 전 이력이다. S2~S6 및 실제1102 순차 이주 acceptance는 별도다.
 
 사슴 이주 첫 구현(2026-11-09): [지역 순차 이주 구현/테스트](Architecture/REGIONAL_DEER_MIGRATION_IMPLEMENTATION_20261109.md)는 `eco.HerdMigration.Regional 1`에서 개별 순차 승인·지역 출발 예산을 제공한다. Editor 빌드/관련 자동화13개는 성공했고 실제1102 지형 도착·저장 왕복·멀티 검증은 남았다. 기본OFF이며 다음 ‘계획만 작성’ 설명은 첫 구현 이전 이력이다.

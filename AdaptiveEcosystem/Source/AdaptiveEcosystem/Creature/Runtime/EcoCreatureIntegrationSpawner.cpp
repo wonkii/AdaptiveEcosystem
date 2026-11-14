@@ -272,6 +272,7 @@ void AEcoCreatureIntegrationSpawner::EndPlay(const EEndPlayReason::Type Reason)
 {
 	FWorldDelegates::OnWorldPostActorTick.Remove(PostTickHandle);
     ResetCombat();
+    HandFeedRequests.Reset();
 	bReady = false;
 	bWaitingForHabitat = false;
 	HabitatStreamingSource->DisableStreamingSource();

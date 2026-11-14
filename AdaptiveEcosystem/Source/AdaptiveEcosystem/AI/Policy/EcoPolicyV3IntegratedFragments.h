@@ -8,6 +8,7 @@
 #include "CoreMinimal.h"
 #include "MassEntityTypes.h"
 #include "EcoLifeHistoryV3.h"
+#include "Core/EcoPlayerInteractionTypes.h"
 
 #include "EcoPolicyV3IntegratedFragments.generated.h"
 
@@ -49,6 +50,12 @@ struct FEcoIntegratedV3Fragment : public FMassFragment
     FVector LastSeenPreyPosition=FVector::ZeroVector;
     int64 LastSeenPreyKey=0;
     double LastSeenPreyTime=-1;
+
+    static constexpr int32 MaxInteractionCandidates = 2;
+    FEcoVisiblePlayerInteraction VisibleInteractions[MaxInteractionCandidates];
+    int32 VisibleInteractionCount = 0;
+    int64 InteractionEvidenceStep = -1;
+    double LastHandFeedIntake = 0;
 
 	/** 사망 원인 (EcoWorldV3::kDeath*: 0 없음, 1 잡힘, 2 굶음). */
 	UPROPERTY(VisibleAnywhere, Transient, Category = "Ecology|PolicyV3")
