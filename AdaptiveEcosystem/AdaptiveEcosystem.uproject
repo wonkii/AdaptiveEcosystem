@@ -21,10 +21,22 @@
 		}
 	],
 	"Plugins": [
-        { "Name": "GameplayAbilities", "Enabled": true },
-		{ "Name": "OnlineSubsystemSteam", "Enabled": true },
-		{ "Name": "OnlineSubsystemNull", "Enabled": true },
-		{ "Name": "SteamSockets", "Enabled": true },
+		{
+			"Name": "GameplayAbilities",
+			"Enabled": true
+		},
+		{
+			"Name": "OnlineSubsystemSteam",
+			"Enabled": true
+		},
+		{
+			"Name": "OnlineSubsystemNull",
+			"Enabled": true
+		},
+		{
+			"Name": "SteamSockets",
+			"Enabled": true
+		},
 		{
 			"Name": "ModelingToolsEditorMode",
 			"Enabled": true,
@@ -66,6 +78,18 @@
 		},
 		{
 			"Name": "WorldConditions",
+			"Enabled": true
+		},
+		{
+			"Name": "Terminal",
+			"Enabled": true
+		},
+		{
+			"Name": "ModelContextProtocol",
+			"Enabled": true
+		},
+		{
+			"Name": "EditorToolset",
 			"Enabled": true
 		}
 	]
