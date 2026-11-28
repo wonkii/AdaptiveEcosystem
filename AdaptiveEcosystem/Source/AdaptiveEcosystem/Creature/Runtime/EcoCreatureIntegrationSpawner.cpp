@@ -6,6 +6,7 @@
 #include "Creature/Runtime/EcoCreatureNetworkTrait.h"
 #include "AI/Policy/EcoBehaviorFragments.h"
 #include "AI/Policy/EcoPolicyV3IntegratedSubsystem.h"
+#include "Core/EcoRuntimeSettings.h"
 #include "AI/Social/EcoSocialFragments.h"
 #include "AI/Social/Shelter/EcoShelterSubsystem.h"
 #include "Ecology/EcologySimulationSubsystem.h"
@@ -108,7 +109,27 @@ void AEcoCreatureIntegrationSpawner::BeginPlay()
 	for (TActorIterator<AEcologyRegion> It(GetWorld()); It; ++It) Regions.Add(*It);
 	Regions.Sort([](const AEcologyRegion& A, const AEcologyRegion& B) { return A.RegionId.LexicalLess(B.RegionId); });
 	if (!RegisterTemplates()) { UE_LOG(LogTemp, Error, TEXT("[Eco Integration] Missing creature configs/bubble registration.")); return; }
-	if (GetNetMode() == NM_Client) { HabitatStreamingSource->DisableStreamingSource(); bReady = true; return; }
+	if (!bAuthorityWorld)
+	{
+		HabitatStreamingSource->DisableStreamingSource();
+		const FName MapPackage(*UWorld::RemovePIEPrefix(GetWorld()->GetPackage()->GetName()));
+		if (const float* Distance = GetDefault<UEcoRuntimeSettings>()->ClientVisualDistanceByMap.Find(MapPackage))
+		{
+			if (FMath::IsFinite(*Distance) && *Distance >= 0.0f && *Distance <= 200000.0f)
+			{
+				ClientVisualDistance = *Distance;
+			}
+			else
+			{
+				UE_LOG(LogTemp, Warning, TEXT("[Eco Visibility] Map=%s invalid Client range %.1f cm; using coordinator range."),
+					*MapPackage.ToString(), *Distance);
+			}
+		}
+		UE_LOG(LogTemp, Log, TEXT("[Eco Visibility] World=%s ClientRangeCm=%.1f"),
+			*GetWorld()->GetPathName(), ClientVisualDistance);
+		bReady = true;
+		return;
+	}
 	if (bUseHabitatStreaming)
 	{
 		if (!FMath::IsFinite(HabitatStreamingRadius) || HabitatStreamingRadius < 3000.0f)

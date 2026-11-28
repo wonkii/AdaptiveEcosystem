@@ -17,6 +17,10 @@
 #include "GameFramework/PlayerController.h"
 #include "Player/EcoCombatRelevanceComponent.h"
 #include "ProfilingDebugging/CpuProfilerTrace.h"
+#if !UE_BUILD_SHIPPING
+#include "Components/SkeletalMeshComponent.h"
+#include "Network/EcoGameState.h"
+#endif
 
 void AEcoCreatureIntegrationSpawner::SyncVisuals(float Delta)
 {
@@ -26,6 +30,18 @@ void AEcoCreatureIntegrationSpawner::SyncVisuals(float Delta)
 	auto& EM = Spawner->GetEntityManagerChecked();
 	const auto& Budget = GetDefault<UEcoRuntimeSettings>()->ConnectionBudget;
 	const double Now = GetWorld()->GetRealTimeSeconds();
+	const bool bClient = GetNetMode() == NM_Client;
+#if !UE_BUILD_SHIPPING
+	const int64 TraceId = PendingVisibilityTraceId;
+	PendingVisibilityTraceId = 0;
+	const TCHAR* TraceStage = TEXT("NoProxy");
+	FVector TracePosition = FVector::ZeroVector;
+	double TraceDistanceCm = -1.0;
+	uint32 TraceSequence = 0;
+	uint32 TraceVisualRevision = 0;
+	uint32 TraceResetRevision = 0;
+	FName TraceSpecies;
+#endif
 	const auto* Native = MixedNativeStep ? GetWorld()->GetSubsystem<UEcoPolicyV3IntegratedSubsystem>() : nullptr;
 	const double NativeAlpha = Native ? FMath::Clamp(FaunaMotionTime * EcoFaunaMotionClock::StepsPerSecond / EcoBehaviorConfig::PolicyInterval
 		- Native->GetGlobalStep(), 0., 1.) : 1.;
@@ -39,7 +55,11 @@ void AEcoCreatureIntegrationSpawner::SyncVisuals(float Delta)
 	for (auto It = GetWorld()->GetPlayerControllerIterator(); It; ++It)
 		if (const auto* PC = It->Get(); PC && PC->IsLocalController())
 		{
-			FVector P; FRotator R; PC->GetPlayerViewPoint(P, R); Viewers.Add(P);
+			// Client possession and its initial view target can arrive after the first proxy.
+			if (bClient && !PC->GetViewTarget()) continue;
+			FVector P; FRotator R; PC->GetPlayerViewPoint(P, R);
+			if (P.ContainsNaN()) continue;
+			Viewers.Add(P);
 			if (const APawn* Pawn = PC->GetPawn())
 				if (const auto* Relevance = Pawn->FindComponentByClass<UEcoCombatRelevanceComponent>())
 					CombatViewers.Add(Relevance);
@@ -59,7 +79,7 @@ void AEcoCreatureIntegrationSpawner::SyncVisuals(float Delta)
 	FMassExecutionContext Context = EM.CreateExecutionContext(Delta);
 	Query.ForEachEntityChunk(Context, [&](FMassExecutionContext& C)
 	{
-		if (GetNetMode() == NM_Client && (!C.GetFragmentView<FEcoVitalsFragment>().IsEmpty() || !C.GetFragmentView<FEcoPolicyOutputFragment>().IsEmpty()))
+		if (bClient && (!C.GetFragmentView<FEcoVitalsFragment>().IsEmpty() || !C.GetFragmentView<FEcoPolicyOutputFragment>().IsEmpty()))
 		{ FailRuntime(TEXT("Client contains authoritative fragments")); return; }
 		const auto Ids = C.GetFragmentView<FEcoIdentityFragment>(); const auto T = C.GetFragmentView<FTransformFragment>();
 		const auto V = C.GetFragmentView<FEcoCreaturePresentationFragment>(); const auto RegionsView = C.GetFragmentView<FEcoRegionFragment>();
@@ -68,7 +88,16 @@ void AEcoCreatureIntegrationSpawner::SyncVisuals(float Delta)
 		const auto NativeBodies = Native ? C.GetFragmentView<FEcoIntegratedV3Fragment>() : TConstArrayView<FEcoIntegratedV3Fragment>();
 		for (int32 I = 0; I < C.GetNumEntities(); ++I)
 		{
-			if (Ids[I].StableAgentId <= 0 || (!Samples.IsEmpty() && !Samples[I].bHasSample)) continue;
+#if !UE_BUILD_SHIPPING
+			const bool bTrace = TraceId > 0 && Ids[I].StableAgentId == TraceId;
+			if (bTrace)
+			{
+				TraceSpecies = Ids[I].SpeciesId;
+				TraceStage = TEXT("NoSample");
+			}
+#endif
+			if (Ids[I].StableAgentId <= 0 || (bClient && Samples.IsEmpty())
+				|| (!Samples.IsEmpty() && !Samples[I].bHasSample)) continue;
 			FVector Position = Samples.IsEmpty() ? T[I].GetTransform().GetLocation()
 				: Samples[I].GetRenderPosition(Now, InterpolationDelaySeconds);
 			if (Samples.IsEmpty() && !NativeBodies.IsEmpty() && NativeBodies[I].bAdopted && !NativeBodies[I].bDead)
@@ -78,11 +107,26 @@ void AEcoCreatureIntegrationSpawner::SyncVisuals(float Delta)
 			}
 			double Distance = Viewers.IsEmpty() ? 0.0 : TNumericLimits<double>::Max();
 			for (const auto& Viewer : Viewers) Distance = FMath::Min(Distance, FVector::DistSquared(Viewer, Position));
-			if (GetNetMode() != NM_Client && !Viewers.IsEmpty() && Distance > FMath::Square(HostVisualDistance)) continue;
+#if !UE_BUILD_SHIPPING
+			if (bTrace)
+			{
+				TracePosition = Position;
+				TraceDistanceCm = Viewers.IsEmpty() ? -1.0 : FMath::Sqrt(Distance);
+				const auto& Sample = Samples[I].Current;
+				TraceSequence = Sample.SampleSequence;
+				TraceVisualRevision = Sample.VisualRevision;
+				TraceResetRevision = Sample.MovementDiscontinuityRevision;
+				TraceStage = Viewers.IsEmpty() ? TEXT("NoViewer") : TEXT("OutsideVisualRange");
+			}
+#endif
+			if (!bClient && !Viewers.IsEmpty() && Distance > FMath::Square(HostVisualDistance)) continue;
 			// Filter before retention bias/combat priority: neither may keep a distant visual alive.
 			// Client proxies and the authority simulation remain independent of local Actor selection.
-			if (GetNetMode() == NM_Client && ClientVisualDistance > 0.0f
-				&& (Viewers.IsEmpty() || Distance > FMath::Square(ClientVisualDistance))) continue;
+			if (bClient && (Viewers.IsEmpty()
+				|| (ClientVisualDistance > 0.0f && Distance > FMath::Square(ClientVisualDistance)))) continue;
+#if !UE_BUILD_SHIPPING
+			if (bTrace) TraceStage = TEXT("ActorBudget");
+#endif
 			const uint32 Revision = Samples.IsEmpty() ? (Resets.IsEmpty() ? 0 : Resets[I].Revision) : Samples[I].Current.MovementDiscontinuityRevision;
 			// A small retention bias prevents swapping equal-distance actors at the budget boundary.
 			if (Visuals.Contains(Ids[I].StableAgentId)) Distance *= .81;
@@ -95,6 +139,9 @@ void AEcoCreatureIntegrationSpawner::SyncVisuals(float Delta)
 		for (const auto* Relevance : CombatViewers)
 			if (Relevance->IsOffered(Input.Id)) { Input.Distance = -1; break; }
 	Inputs.Sort([](const FInput& A, const FInput& B) { return A.Distance == B.Distance ? A.Id < B.Id : A.Distance < B.Distance; });
+#if !UE_BUILD_SHIPPING
+	const int32 CandidateCount = Inputs.Num();
+#endif
 	if (Inputs.Num() > Budget.MaxActorRepresentations) Inputs.SetNum(Budget.MaxActorRepresentations);
 	TSet<int64> Selected; for (const auto& Input : Inputs) Selected.Add(Input.Id);
 	for (auto It = Visuals.CreateIterator(); It; ++It) if (!Selected.Contains(It.Key()))
@@ -105,12 +152,20 @@ void AEcoCreatureIntegrationSpawner::SyncVisuals(float Delta)
 	int32 Adds = 0;
 	for (const auto& Input : Inputs)
 	{
+#if !UE_BUILD_SHIPPING
+		const bool bTrace = TraceId == Input.Id;
+		if (bTrace) TraceStage = TEXT("AddBudget");
+#endif
 		auto* Existing = Visuals.Find(Input.Id);
 		if (!Existing || !Existing->Actor.IsValid())
 		{
 			if (Adds >= Budget.MaxAddsPerUpdate) continue;
             const auto* Fauna = FindFauna(Input.Species);
             const auto Class = Fauna ? Fauna->VisualClass : Input.Species == TEXT("Wolf") ? WolfActorClass : HerbivoreActorClass;
+#if !UE_BUILD_SHIPPING
+			if (bTrace) TraceStage = Class ? TEXT("SpawnFailed") : TEXT("MissingClass");
+#endif
+			if (!Class) continue;
 			AEcoCreatureRepresentationActor* Actor = nullptr;
 			for (int32 I = VisualPool.Num() - 1; I >= 0; --I)
 				if (IsValid(VisualPool[I]) && VisualPool[I]->GetClass() == Class.Get())
@@ -125,7 +180,11 @@ void AEcoCreatureIntegrationSpawner::SyncVisuals(float Delta)
 				FActorSpawnParameters Params; Params.Owner = this; Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
 				Actor = GetWorld()->SpawnActor<AEcoCreatureRepresentationActor>(Class, Input.Position, FRotator::ZeroRotator, Params);
 			}
-			if (!Actor || !Actor->BindIdentity(Input.Id, Input.Species)) { if (Actor) Actor->Destroy(); continue; }
+			if (!Actor) continue;
+#if !UE_BUILD_SHIPPING
+			if (bTrace) TraceStage = TEXT("BindRejected");
+#endif
+			if (!Actor->BindIdentity(Input.Id, Input.Species)) { Actor->Destroy(); continue; }
 			auto& Binding = Visuals.FindOrAdd(Input.Id); Binding.Actor = Actor; Binding.Sequence = 0; ++Adds;
 			Existing = &Binding;
 		}
@@ -147,8 +206,37 @@ void AEcoCreatureIntegrationSpawner::SyncVisuals(float Delta)
 		State.bHasVitals = (Input.Visual.Flags & 8) != 0;
 		State.NormalizedHealth = Input.Visual.Health / 255.f; State.NormalizedEnergy = Input.Visual.Energy / 255.f;
 		Binding.Actor->Footsteps->AudioSet = FootstepAudioSet;
+#if !UE_BUILD_SHIPPING
+		const bool bAccepted = Binding.Actor->ConsumeVisualState(State, Delta);
+		if (bTrace) TraceStage = bAccepted ? TEXT("Bound") : TEXT("VisualStateRejected");
+#else
 		Binding.Actor->ConsumeVisualState(State, Delta);
+#endif
 	}
+#if !UE_BUILD_SHIPPING
+	if (TraceId > 0)
+	{
+		const auto* GameState = GetWorld()->GetGameState<AEcoGameState>();
+		const auto* Binding = Visuals.Find(TraceId);
+		const auto* Actor = Binding ? Binding->Actor.Get() : nullptr;
+		const auto* Mesh = Actor ? Actor->CreatureMesh.Get() : nullptr;
+		const auto* Fauna = FindFauna(TraceSpecies);
+		const auto Class = Fauna ? Fauna->VisualClass : TraceSpecies == TEXT("Wolf") ? WolfActorClass : HerbivoreActorClass;
+		UE_LOG(LogTemp, Display, TEXT("[Eco Visibility] World=%s Epoch=%d ID=%lld Species=%s Stage=%s Position=%s DistanceCm=%.1f RangeCm=%.1f Candidates=%d Selected=%d ActorBudget=%d Adds=%d AddBudget=%d Sequence=%u VisualRev=%u ResetRev=%u"),
+			*GetWorld()->GetPathName(), GameState ? GameState->GetWorldEpoch() : 0, TraceId, *TraceSpecies.ToString(),
+			TraceStage, *TracePosition.ToCompactString(), TraceDistanceCm, ClientVisualDistance, CandidateCount, Inputs.Num(),
+			Budget.MaxActorRepresentations, Adds, Budget.MaxAddsPerUpdate, TraceSequence, TraceVisualRevision, TraceResetRevision);
+		for (int32 Index = 0; Index < Viewers.Num(); ++Index)
+		{
+			UE_LOG(LogTemp, Display, TEXT("[Eco Visibility] ID=%lld Viewer=%d Camera=%s"), TraceId, Index, *Viewers[Index].ToCompactString());
+		}
+		UE_LOG(LogTemp, Display, TEXT("[Eco Visibility] ID=%lld ExpectedClass=%s Actor=%s ActorClass=%s Bound=%d Hidden=%d ActorPosition=%s Mesh=%s MeshVisible=%d Scale=%s"),
+			TraceId, *GetPathNameSafe(Class.Get()), *GetNameSafe(Actor), *GetNameSafe(Actor ? Actor->GetClass() : nullptr),
+			Actor && Actor->bBound, Actor && Actor->IsHidden(), Actor ? *Actor->GetActorLocation().ToCompactString() : TEXT("-"),
+			*GetPathNameSafe(Mesh ? Mesh->GetSkeletalMeshAsset() : nullptr), Mesh && Mesh->IsVisible(),
+			Actor ? *Actor->GetActorScale3D().ToCompactString() : TEXT("-"));
+	}
+#endif
     TArray<int64> PresentedIds;
     for (const auto& Pair:Visuals)
         if (const auto* Actor=Pair.Value.Actor.Get(); Actor && Actor->bBound && !Actor->IsHidden() && Actor->VisualState.bAlive) PresentedIds.Add(Pair.Key);

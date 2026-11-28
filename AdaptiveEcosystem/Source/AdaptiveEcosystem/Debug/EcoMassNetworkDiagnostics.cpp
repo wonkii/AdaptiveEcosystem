@@ -6,6 +6,9 @@
 #include "MassEntityManager.h"
 #include "MassEntityQuery.h"
 #include "MassExecutionContext.h"
+#include "MassLODSubsystem.h"
+#include "GameFramework/PlayerController.h"
+#include "GameFramework/Pawn.h"
 #include "MassCommonFragments.h"
 #include "Mass/EcoMassFragments.h"
 #include "Mass/EcoMassTags.h"
@@ -105,7 +108,7 @@ namespace
 		}));
 
 	FAutoConsoleCommandWithWorldAndArgs NetworkDump(
-		TEXT("eco.M4.Dump"), TEXT("Read-only M4 baseline counts/IDs in the selected PIE world. Use eco.M4.Dump details for rows."),
+		TEXT("eco.M4.Dump"), TEXT("Read-only M4 counts in the selected world. Use eco.M4.Dump details [StableAgentId] for rows."),
 		FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
 		{
 			if (!IsInGameThread() || !World || !World->IsGameWorld()) return;
@@ -119,6 +122,12 @@ namespace
 			}
 			const bool bClient = World->GetNetMode() == NM_Client;
 			const bool bDetails = Args.Contains(TEXT("details"));
+			int64 FilterId = 0;
+			if (bDetails && Args.Num() > 1 && (!LexTryParseString(FilterId, *Args[1]) || FilterId <= 0))
+			{
+				UE_LOG(LogAdaptiveEcosystem, Display, TEXT("Usage: eco.M4.Dump details [positive StableAgentId]"));
+				return;
+			}
 			int32 Count = 0, Alive = 0, Duplicates = 0, InvalidIds = 0;
 			TSet<int64> Seen;
 			TArray<FString> Rows;
@@ -174,7 +183,7 @@ namespace
 						Cause = static_cast<int32>(Chunk.GetFragmentView<FEcoDeathFragment>()[I].Cause);
 					}
 					Alive += bAlive;
-					if (bDetails) Rows.Add(FString::Printf(TEXT("ID=%lld Species=%s Region=%s Alive=%d Sequence=%u Health=%.3f Energy=%.3f ZeroSeconds=%.3f State=%d Target=%s Reason=%d DeathCause=%d Position=%s"),
+					if (bDetails && (FilterId == 0 || Ids[I].StableAgentId == FilterId)) Rows.Add(FString::Printf(TEXT("ID=%lld Species=%s Region=%s Alive=%d Sequence=%u Health=%.3f Energy=%.3f ZeroSeconds=%.3f State=%d Target=%s Reason=%d DeathCause=%d Position=%s"),
 						Ids[I].StableAgentId, *Ids[I].SpeciesId.ToString(), *Regions[I].CurrentRegionId.ToString(), bAlive, Sequence,
 						Health, Energy, ZeroSeconds, State, *Target.ToString(), Reason, Cause,
 						*Chunk.GetFragmentView<FTransformFragment>()[I].GetTransform().GetLocation().ToString()));
@@ -192,11 +201,28 @@ namespace
 						R.OutboundCount, R.IncomingCount, R.ProjectedPopulation, R.EcologicalComfortPopulation, R.CrowdingRatio,
 						R.FoodSatisfaction, R.bPressureActive, R.StarvationDeaths, R.ExternalDeaths);
 			}
+			if (!bClient && bDetails)
+			{
+				if (const auto* LOD = World->GetSubsystem<UMassLODSubsystem>())
+				{
+					for (auto It = World->GetPlayerControllerIterator(); It; ++It)
+					{
+						const auto* PC = It->Get();
+						if (!PC) continue;
+						const int32 Index = LOD->GetValidViewerIdx(LOD->GetViewerHandleFromActor(*PC));
+						const auto* Viewer = Index == INDEX_NONE ? nullptr : &LOD->GetViewers()[Index];
+						UE_LOG(LogAdaptiveEcosystem, Log, TEXT("[M4 Viewer] World=%s Controller=%s Local=%d Pawn=%s HasConnection=%d Registered=%d Enabled=%d Position=%s"),
+							*World->GetPathName(), *PC->GetName(), PC->IsLocalController(), *GetNameSafe(PC->GetPawn()),
+							PC->GetNetConnection() != nullptr, Viewer != nullptr, Viewer && Viewer->bEnabled,
+							Viewer ? *Viewer->Location.ToCompactString() : TEXT("-"));
+					}
+				}
+			}
 			for (TActorIterator<AEcoMassClientBubbleInfo> It(World); It; ++It)
 			{
 				const auto& Serializer = It->GetSerializer();
-				UE_LOG(LogAdaptiveEcosystem, Log, TEXT("[M4] Bubble=%s Entries=%d PendingAdds=%d"),
-					*It->GetName(), Serializer.GetAgentItems().Num(), Serializer.Bubble.GetPendingAddCount());
+				UE_LOG(LogAdaptiveEcosystem, Log, TEXT("[M4] Bubble=%s Entries=%d PendingAdds=%d Owner=%s"),
+					*It->GetName(), Serializer.GetAgentItems().Num(), Serializer.Bubble.GetPendingAddCount(), *GetNameSafe(It->GetOwner()));
 #if UE_REPLICATION_COMPILE_SERVER_CODE
 				if (!bClient)
 				{
@@ -214,14 +240,19 @@ namespace
 					}
 				}
 #endif
-				if (bDetails)
-					for (const auto& Item : Serializer.GetAgentItems())
-						UE_LOG(LogAdaptiveEcosystem, Log, TEXT("[M4] Bubble=%s ID=%lld Template=%s Sequence=%u ServerRealTime=%.6f VisualRev=%u ResetRev=%u %s"),
-							*It->GetName(), Item.Agent.GetStableAgentId(), *Item.Agent.GetTemplateID().ToString(),
-							Item.Agent.MakeRepresentationSnapshot().SampleSequence, Item.Agent.MakeRepresentationSnapshot().ServerSampleRealTimeSeconds,
-							Item.Agent.MakeRepresentationSnapshot().VisualRevision, Item.Agent.GetMovementDiscontinuityRevision(),
-							bClient ? TEXT("ServerLOD=not replicated") : *FString::Printf(TEXT("LOD=%d Interval=%.3f LastCheck=%.6f"),
-								static_cast<int32>(Item.LastObservedLOD), Item.ConfiguredUpdateInterval, Item.LastTransformCheckRealTime));
+				if (!bDetails) continue;
+				for (const auto& Item : Serializer.GetAgentItems())
+				{
+					if (FilterId > 0 && Item.Agent.GetStableAgentId() != FilterId) continue;
+					const auto Sample = Item.Agent.MakeRepresentationSnapshot();
+					const FString Status = bClient
+						? FString::Printf(TEXT("TemplateRegistered=%d"), Spawner->GetMassEntityTemplate(Item.Agent.GetTemplateID()) != nullptr)
+						: FString::Printf(TEXT("LOD=%d Interval=%.3f LastCheck=%.6f"),
+							static_cast<int32>(Item.LastObservedLOD), Item.ConfiguredUpdateInterval, Item.LastTransformCheckRealTime);
+					UE_LOG(LogAdaptiveEcosystem, Log, TEXT("[M4] Bubble=%s ID=%lld Template=%s Sequence=%u ServerRealTime=%.6f VisualRev=%u ResetRev=%u %s"),
+						*It->GetName(), Sample.StableAgentId, *Item.Agent.GetTemplateID().ToString(), Sample.SampleSequence,
+						Sample.ServerSampleRealTimeSeconds, Sample.VisualRevision, Sample.MovementDiscontinuityRevision, *Status);
+				}
 			}
 		}));
 }

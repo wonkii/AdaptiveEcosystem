@@ -174,6 +174,9 @@ public:
 	UFUNCTION(BlueprintPure, Category="Creature") int32 GetVisualCount() const { return Visuals.Num(); }
 	UFUNCTION(BlueprintPure, Category="Creature") bool IsRuntimeReady() const { return bReady; }
 	UFUNCTION(BlueprintCallable, Category="Creature|Diagnostics") void DumpRuntime(bool bDetails = false) const;
+#if !UE_BUILD_SHIPPING
+	void RequestVisibilityTrace(int64 StableAgentId);
+#endif
     /** Explicit authority checkpoint. Slots are local Saved/Ecosystem names, not arbitrary paths. */
     UFUNCTION(BlueprintCallable, Category="Creature|Persistence") bool SaveEcosystem(const FString& Slot);
     UFUNCTION(BlueprintCallable, Category="Creature|Persistence") bool LoadEcosystem(const FString& Slot);
@@ -344,6 +347,9 @@ private:
 	void UpdateSensoryPresentation();
 	void UpdateSimulationLOD();
 	void SyncVisuals(float DeltaSeconds);
+#if !UE_BUILD_SHIPPING
+	int64 PendingVisibilityTraceId = 0;
+#endif
 	void PublishSummary();
 	void FailRuntime(const TCHAR* Reason);
 	TMap<FName,double> NextPresentationAlarm;

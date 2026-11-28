@@ -1,5 +1,7 @@
 # 생태계 서버·네트워킹 담당 AI 작업 가이드
 
+1102에서 Client로 Play할 때 동물이 보이지 않으면 [서버 개체의 Client 표시 개발 명세](CLIENT_CREATURE_VISIBILITY_SPEC_20261125.md)의 재현 절차로 시작한다. 같은 개체 ID를 연결별 Bubble, 수신 proxy, 로컬 Actor, 실제 게임 화면까지 대조한다.
+
 최신 다종 맵의 이 역할 작업과 완료 기준은 [다종 생태계 팀 인수인계](../Team/FAUNA_TEAM_HANDOFF.md)를 먼저 확인한다.
 
 2026-11-12 통합 레벨 복사본의 60분 실험은 기존 바이너리의 NullRHI Standalone 실행이다. 권위 인구 장부와 Native 섭취는 확인했다. 이 복사본의 Dedicated·다중 Client·저장 복원, 최근 C++ 실행기 혼용 방지 변경은 각각 별도 검증이 필요하다. [통합 레벨 실행 결과](../Architecture/FAUNA_POPULATION_BALANCE.md#integration_jwj-복사본의-r7e자연-출생과-다종-공존)

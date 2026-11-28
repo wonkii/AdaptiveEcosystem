@@ -117,6 +117,36 @@ void AEcoCreatureIntegrationSpawner::DumpRuntime(bool bDetails) const
 }
 
 #if !UE_BUILD_SHIPPING
+void AEcoCreatureIntegrationSpawner::RequestVisibilityTrace(int64 StableAgentId)
+{
+	if (!bReady)
+	{
+		UE_LOG(LogTemp, Display, TEXT("[Eco Visibility] World=%s ID=%lld Stage=CoordinatorNotReady"), *GetWorld()->GetPathName(), StableAgentId);
+		return;
+	}
+	PendingVisibilityTraceId = StableAgentId;
+}
+
+static FAutoConsoleCommandWithWorldAndArgs EcoVisibilityTrace(TEXT("eco.Integration.Visibility"),
+	TEXT("Trace one Client proxy through the next presentation update: eco.Integration.Visibility <StableAgentId>."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
+	{
+		int64 Id = 0;
+		if (!IsInGameThread() || !World || World->GetNetMode() != NM_Client
+			|| Args.Num() != 1 || !LexTryParseString(Id, *Args[0]) || Id <= 0)
+		{
+			UE_LOG(LogTemp, Display, TEXT("Run eco.Integration.Visibility <positive StableAgentId> in a Client world."));
+			return;
+		}
+		TActorIterator<AEcoCreatureIntegrationSpawner> Runtime(World);
+		if (Runtime)
+		{
+			Runtime->RequestVisibilityTrace(Id);
+			return;
+		}
+		UE_LOG(LogTemp, Display, TEXT("[Eco Visibility] World=%s ID=%lld Stage=NoCoordinator"), *World->GetPathName(), Id);
+	}));
+
 static FAutoConsoleCommandWithWorldAndArgs EcoIntegrationDump(TEXT("eco.Integration.Dump"),
 	TEXT("Manual integration counts, conservation and logical scheduling debt in the selected world."),
 	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)

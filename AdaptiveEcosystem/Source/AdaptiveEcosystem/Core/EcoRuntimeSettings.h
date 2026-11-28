@@ -24,6 +24,9 @@ public:
 	/** Connection-wide admission/Add and local Actor caps across templates. Restart PIE after editing. */
 	UPROPERTY(Config, EditAnywhere, Category="M4|Connection Budget")
 	FEcoConnectionBudgetSettings ConnectionBudget;
+	/** Client camera range in cm by long map package name. Overrides the coordinator's range at Client BeginPlay. */
+	UPROPERTY(Config, EditAnywhere, Category="M4|Presentation", meta=(DisplayName="Client Visual Distance by Map (cm)"))
+	TMap<FName, float> ClientVisualDistanceByMap;
 	UPROPERTY(Config, EditAnywhere, Category="M3|Migration")
 	FEcoMigrationSettings Migration;
 	/** Read-only region summaries on host/client; authoritative agent IDs and arrows on host. */
