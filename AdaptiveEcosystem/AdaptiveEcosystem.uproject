@@ -91,6 +91,10 @@
 		{
 			"Name": "EditorToolset",
 			"Enabled": true
+		},
+		{
+			"Name": "LearningAgents",
+			"Enabled": true
 		}
 	]
 }
