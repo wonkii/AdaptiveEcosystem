@@ -50,6 +50,8 @@ void UEcoSpeciesAINavigationProcessor::Execute(FMassEntityManager& EM,FMassExecu
     struct FCandidate{FMassEntityHandle Entity;double Since;int64 Id;bool Urgent;};TArray<FCandidate> Pending;
     Query.ForEachEntityChunk(Context,[&](FMassExecutionContext& C)
     {
+        const auto* Profile=C.GetConstSharedFragment<FEcoSpeciesAISharedFragment>().Profile.Get();
+        if(!Profile)return;
         auto Moves=C.GetMutableFragmentView<FEcoSpeciesAIMoveFragment>();auto Targets=C.GetMutableFragmentView<FMassMoveTargetFragment>();
         auto Paths=C.GetMutableFragmentView<FMassNavMeshShortPathFragment>();auto Cached=C.GetMutableFragmentView<FMassNavMeshCachedPathFragment>();
         auto Desired=C.GetMutableFragmentView<FMassDesiredMovementFragment>();auto Forces=C.GetMutableFragmentView<FMassForceFragment>();
@@ -57,28 +59,37 @@ void UEcoSpeciesAINavigationProcessor::Execute(FMassEntityManager& EM,FMassExecu
         for(int32 I=0;I<C.GetNumEntities();++I)
         {
             auto& M=Moves[I];auto& Target=Targets[I];
-            if(M.Speed<=0||M.Status==EEcoAINavigationStatus::None||M.Status==EEcoAINavigationStatus::Arrived)
+            if(M.Status==EEcoAINavigationStatus::Following && (!Cached[I].NavPath.IsValid() || !Cached[I].NavPath->IsValid()))
+            {
+                M.Status=EEcoAINavigationStatus::Pending;
+                M.RequestedAt=Now;
+                M.Deadline=Now+Profile->PathTimeout;
+            }
+            if(M.Speed<=0||M.Status!=EEcoAINavigationStatus::Following)
             {
                 if(Target.GetCurrentAction()!=EMassMovementAction::Stand)Target.CreateNewAction(EMassMovementAction::Stand,*W);
                 Target.Center=T[I].GetTransform().GetLocation();Target.DesiredSpeed.Set(0);Paths[I].Reset();Cached[I].NavPath.Reset();Cached[I].Corridor.Reset();
-                Desired[I].DesiredVelocity=FVector::ZeroVector;Forces[I].Value=FVector::ZeroVector;continue;
-            }
-            if(M.Status==EEcoAINavigationStatus::Following&&Cached[I].NavPath.IsValid()&&Cached[I].NavPath->IsValid())
-            {
-                Target.DesiredSpeed.Set(M.Speed);
-                if(Paths[I].IsDone()&&Paths[I].bPartialResult&&Cached[I].Corridor.IsValid())
-                {
-                    Paths[I].RequestShortPath(Cached[I].Corridor,Cached[I].NavPathNextStartIndex,FMassNavMeshCachedPathFragment::NumLeadingPoints,M.Radius);
-                    Cached[I].NavPathNextStartIndex+=uint16(FMath::Max(int32(Paths[I].NumPoints)-int32(FMassNavMeshShortPathFragment::NumPointsBeyondUpdate)-1,0));
-                }
+                Desired[I].DesiredVelocity=FVector::ZeroVector;Forces[I].Value=FVector::ZeroVector;
+                if(M.Speed>0 && M.Status==EEcoAINavigationStatus::Pending && Now>=M.RetryAfter)
+                    Pending.Add({C.GetEntity(I),M.RequestedAt,Ids[I].StableAgentId,M.Activity==EEcoSpeciesActivity::Flee||M.Activity==EEcoSpeciesActivity::Pursue});
                 continue;
             }
-            if(Now<M.RetryAfter)continue;
-            Pending.Add({C.GetEntity(I),M.RequestedAt,Ids[I].StableAgentId,M.Activity==EEcoSpeciesActivity::Flee||M.Activity==EEcoSpeciesActivity::Pursue});
+            Target.DesiredSpeed.Set(M.Speed);
+            if(Paths[I].IsDone()&&Paths[I].bPartialResult&&Cached[I].Corridor.IsValid())
+            {
+                if(!Paths[I].RequestShortPath(Cached[I].Corridor,Cached[I].NavPathNextStartIndex,FMassNavMeshCachedPathFragment::NumLeadingPoints,M.Radius))
+                {
+                    M.Status=EEcoAINavigationStatus::Failed;
+                    M.RetryAfter=Now+Profile->RepathInterval;
+                    ++M.Failures;
+                    continue;
+                }
+                Cached[I].NavPathNextStartIndex+=uint16(FMath::Max(int32(Paths[I].NumPoints)-int32(FMassNavMeshShortPathFragment::NumPointsBeyondUpdate)-1,0));
+            }
         }
     });
     // Aging prevents ordinary wander requests from starving behind perpetual pursuit requests.
-    Pending.Sort([Now](const auto& A,const auto& B){const double AP=A.Since-(A.Urgent?1:0),BP=B.Since-(B.Urgent?1:0);return AP==BP?A.Id<B.Id:AP<BP;});
+    Pending.Sort([](const auto& A,const auto& B){const double AP=A.Since-(A.Urgent?1:0),BP=B.Since-(B.Urgent?1:0);return AP==BP?A.Id<B.Id:AP<BP;});
     auto* Nav=FNavigationSystem::GetCurrent<UNavigationSystemV1>(W);int32 Count=0;const double Start=FPlatformTime::Seconds();
     for(const auto& Candidate:Pending)
     {

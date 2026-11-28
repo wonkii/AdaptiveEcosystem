@@ -3,11 +3,18 @@ void FEcoSpeciesAIMoveFragment::SetTarget(const FVector& Position, float InSpeed
 {
     if (Position.ContainsNaN()) { Hold(Now); return; }
     Speed=FMath::Clamp(InSpeed,0.f,P.RunSpeed); Radius=FMath::Max(1.f,InRadius);
-    if (Status==EEcoAINavigationStatus::Following && Now<RetryAfter) return;
-    if (Revision==0 || Status==EEcoAINavigationStatus::None || FVector::DistSquared(Position,Target)>FMath::Square(P.RetargetDistance)
-        || (Status==EEcoAINavigationStatus::Failed && Now>=RetryAfter))
+    const bool bWaitingForRetry = Status == EEcoAINavigationStatus::Failed && Now < RetryAfter;
+    const bool bFollowingDuringCooldown = Status == EEcoAINavigationStatus::Following && Now < RetryAfter;
+    if (bWaitingForRetry || bFollowingDuringCooldown) return;
+
+    // After arrival, a moving target can leave the arrival radius without crossing RetargetDistance.
+    const float GoalTolerance = Status == EEcoAINavigationStatus::Arrived
+        ? FMath::Min(Radius, P.RetargetDistance) : P.RetargetDistance;
+    if (Revision==0 || Status==EEcoAINavigationStatus::None || Status==EEcoAINavigationStatus::Failed
+        || FVector::DistSquared(Position,Target)>FMath::Square(GoalTolerance))
     {
         Target=Position; ++Revision; RequestedAt=Now; Deadline=Now+P.PathTimeout;
+        RetryAfter=Now;
         Status=EEcoAINavigationStatus::Pending; BestDistance=MAX_flt; LastProgress=Now;
     }
 }

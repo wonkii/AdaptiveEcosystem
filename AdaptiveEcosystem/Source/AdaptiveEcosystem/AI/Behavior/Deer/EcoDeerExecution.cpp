@@ -29,15 +29,21 @@ void EcoSpeciesAI::ExecuteDeer(const FEcoSpeciesAIInputFragment& I,const FEcoSpe
     if(!I.bThreat&&I.CalmSince>=0&&Now-I.CalmSince<P.CalmSeconds
         &&(E.Activity==EEcoSpeciesActivity::Flee||E.Activity==EEcoSpeciesActivity::Recover||D.Activity==EEcoSpeciesActivity::Flee))Mode=EEcoSpeciesActivity::Recover;
     if(!I.bThreat&&Mode==EEcoSpeciesActivity::Flee)Mode=EEcoSpeciesActivity::Wander;
-    if(E.Activity!=Mode){M.Hold(Now);E.GoalUntil=0;}
+    const bool bContinuingForage = Mode == EEcoSpeciesActivity::Forage && E.Activity == EEcoSpeciesActivity::Graze;
+    if(E.Activity!=Mode && !bContinuingForage){M.Hold(Now);E.GoalUntil=0;}
     const bool WantsSlot=Mode==EEcoSpeciesActivity::Forage||Mode==EEcoSpeciesActivity::Rest;
     const auto WantedKind=Mode==EEcoSpeciesActivity::Rest?EEcoActivitySlotKind::Rest:EEcoActivitySlotKind::Graze;
     if((!WantsSlot||E.SlotKind!=WantedKind)&&E.SlotReservation>0){if(Slots)Slots->Release(E.SlotReservation);E.SlotReservation=0;}
     if(Mode==EEcoSpeciesActivity::Flee)
     {
         FVector Away=(I.Position-I.CuePosition).GetSafeNormal2D();if(Away.IsNearlyZero())Away=FVector((Id&1)?1:-1,0,0);
-        if(M.Status==EEcoAINavigationStatus::Failed)Away=Away.RotateAngleAxis((Id&1)?60:-60,FVector::UpVector);
-        if(E.Activity!=EEcoSpeciesActivity::Flee||Now>=E.GoalUntil||M.Status==EEcoAINavigationStatus::Failed
+        const bool bRetryFlee = M.Status == EEcoAINavigationStatus::Failed && Now >= M.RetryAfter;
+        if (bRetryFlee)
+        {
+            const float Turn = M.Failures % 2 == 0 ? -60.f : 60.f;
+            Away = Away.RotateAngleAxis((Id & 1) ? Turn : -Turn, FVector::UpVector);
+        }
+        if(E.Activity!=EEcoSpeciesActivity::Flee||Now>=E.GoalUntil||bRetryFlee
             ||FVector::Dist2D(I.Position,E.RetainedGoal)<=P.ArrivalRadius)
         {E.RetainedGoal=I.Position+Away*P.WanderRadius*FMath::Lerp(.5f,1.5f,FMath::Clamp(EffectiveAction.FleeDist,0.f,1.f));E.GoalUntil=Now+2;}
         M.SetTarget(ResidentGoal(I,E.RetainedGoal,P),P.RunSpeed,P.ArrivalRadius,Now,P);
