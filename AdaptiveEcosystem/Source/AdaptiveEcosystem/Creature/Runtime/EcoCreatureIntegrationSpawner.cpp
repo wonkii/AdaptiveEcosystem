@@ -69,6 +69,15 @@ void AEcoCreatureIntegrationSpawner::BeginPlay()
 {
 	Super::BeginPlay();
 	bAuthorityWorld = GetNetMode() != NM_Client;
+	if (bAuthorityWorld)
+	{
+		const auto* Native = GetWorld()->GetSubsystem<UEcoPolicyV3IntegratedSubsystem>();
+		if (Native && Native->IsDeerDecisionStartupRejected())
+		{
+			FailRuntime(TEXT("V3 deer StateTree startup rejected"));
+			return;
+		}
+	}
     if (bAuthorityWorld)
         for (TActorIterator<AEcoMassNetworkBootstrap> It(GetWorld()); It; ++It)
         {

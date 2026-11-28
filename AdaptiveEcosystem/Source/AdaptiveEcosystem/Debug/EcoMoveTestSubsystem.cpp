@@ -999,7 +999,8 @@ bool UEcoMoveTestSubsystem::WriteReport(const TCHAR* Result, const TCHAR* Reason
 		"life_separation_dx_cm,life_separation_dy_cm,life_motion,social_control,boundary_steer,detour,detour_failed,obstacle_hit,"
 		"island_steer,island_slide,move_rejected,alternative_accepted,ground_rejections,contact_rejections,intake,death_cause,"
 		"static_mesh_hit,static_straight_block,static_final_block,static_hit_x_cm,static_hit_y_cm,static_hit_z_cm,"
-		"static_hit_normal_x,static_hit_normal_y,static_hit_component,static_hit_item,body_radius_cm\n")};
+		"static_hit_normal_x,static_hit_normal_y,static_hit_component,static_hit_item,body_radius_cm,"
+		"regional_player_attitude,player_distance_cm,player_alert_cm,player_retreat_cm,regional_player_response\n")};
 	int32 GoalChanges = 0, GoalReversals = 0, BaseReversals = 0, FinalReversals = 0, ActualReversals = 0;
 	int32 GroundRejectedSteps = 0, ContactRejectedSteps = 0, FlightStarts = 0, StepGaps = 0, ArrivedSteps = 0;
 	int64 FirstFlightStep = -1;
@@ -1018,7 +1019,8 @@ bool UEcoMoveTestSubsystem::WriteReport(const TCHAR* Result, const TCHAR* Reason
 			S.bIslandSteer, S.IslandSlide, S.bMoveRejected, S.bAlternativeAccepted, S.GroundRejections,
 			S.ContactRejections, S.Intake, S.DeathCause, S.bStaticMeshHit, S.StaticMoveBlock, S.StaticFinalBlock,
 			S.StaticHitPoint.X, S.StaticHitPoint.Y, S.StaticHitPoint.Z, S.StaticHitNormal.X, S.StaticHitNormal.Y,
-			S.StaticHitComponent, S.StaticHitItem, double(S.BodyRadiusCm));
+			S.StaticHitComponent, S.StaticHitItem, double(S.BodyRadiusCm), S.RegionalPlayerAttitude, S.PlayerDistanceCm,
+			S.PlayerAlertCm, S.PlayerRetreatCm, S.RegionalPlayerResponse);
 		Models.Add(S.Brain);
 		Seeds.Add(LexToString(S.Seed));
 		GroundRejectedSteps += S.GroundRejections > 0 ? 1 : 0;

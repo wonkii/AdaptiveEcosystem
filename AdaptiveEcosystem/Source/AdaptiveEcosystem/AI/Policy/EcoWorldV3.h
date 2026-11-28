@@ -2178,6 +2178,8 @@ namespace EcoWorldV3
 		std::int64_t BehaviorSteps[EcoRepertoireV3::kNumBehaviors] = {};   // Commit 뒤 행동별 개체·스텝
 		std::int64_t Entries[EcoRepertoireV3::kNumBehaviors] = {};         // 행동 진입 (전환) 수
 		std::int64_t Decisions = 0;          // 요청을 읽은 수 (reads)
+		std::int64_t ActionPolicyInferences = 0;
+		std::int64_t RoutePolicyInferences = 0;
 		std::int64_t Caught = 0;
 		std::int64_t Starved = 0;            // 굶어 죽음 (같은 스텝에 잡힌 개체는 빼고)
 		std::int64_t Reproduced = 0;
@@ -2330,9 +2332,17 @@ namespace EcoWorldV3
 		~FHerbDiscTiming() { if (Seconds) *Seconds += std::chrono::duration<double>(FClock::now() - Start).count(); }
 	};
 
+	struct FHerbDecisionSelector
+	{
+		void* User = nullptr;
+		std::int32_t (*Select)(void* User, std::int32_t Row, std::int64_t Step, bool bRoute,
+			const FHerbView&, const std::uint8_t* Mask, double EnergyFraction, double Darkness) = nullptr;
+	};
+
 	struct FStepHooks
 	{
 		void* User = nullptr;
+		FHerbDecisionSelector HerbDecision;
         // Optional integrated Social intent, after native policy/control, before the one movement/vitals integration.
         // nullptr preserves all Python/C++ golden behavior. Does not write raw Request or observations.
         void (*HerbControl)(void* User, std::int32_t Index, const FHerbView& Herb) = nullptr;
@@ -2351,6 +2361,9 @@ namespace EcoWorldV3
 		std::vector<FHerbPreMoveRow>* HerbPreMoveSnapshot = nullptr;
 		// Optional batch of direction proposals from the same post-detour, pre-integration instant.
 	void (*HerbAvoidance)(void* User, const FHerbSteeringRow* Inputs, FVec2* Deltas, std::int32_t Count) = nullptr;
+		// Player rations are separate from the spatial food ledger. Both hooks are optional.
+		double (*HerbFeedOffer)(void* User, std::int32_t Index, const FHerbView& Herb, bool bCaught) = nullptr;
+		void (*HerbFeedResolved)(void* User, std::int32_t Index, double EnergyFraction) = nullptr;
 	};
 
 	/** 세계 상태 (Mass 경로는 UEcoPolicyV3Subsystem 이 하나 가진다). */
@@ -3005,7 +3018,8 @@ namespace EcoWorldV3
 	}
 
 	/** 초식 하나의 다음 요청: 결정 관측 → Prepare → 가능·결정 마스크 → reads 면 망 argmax, 아니면 지금 행동. */
-	inline void DecideHerb(FWorldState& W, const FHerbView& H, const EcoPolicyV3::FPolicyNetV3& Net = EcoPolicyV3::kBuiltinNet)
+	inline void DecideHerb(FWorldState& W, const FHerbView& H, const EcoPolicyV3::FPolicyNetV3& Net = EcoPolicyV3::kBuiltinNet,
+		const FHerbDecisionSelector* Selector = nullptr, std::int32_t Row = 0)
 	{
 		static_assert(EcoObservationV3::kObsDimRoute <= EcoPolicyV3::kMaxObsDim, "관측 24 가 망 입력 상한을 넘는다");
 		FHerbDecision& D = *H.Decision;
@@ -3037,9 +3051,17 @@ namespace EcoWorldV3
 				// FLEE 그대로이고(덮기 실행기), 고른 칸은 다음 A 첫머리의 RouteApply 가 길로 읽는다. 도주 비결정·웅크림 줄은 망을 부르지 않는다(한 칸이라 결과가 같다)
 				EcoPolicyV3::ApplyRouteMaskRows(W.bFleeGate ? EcoPolicyV3::kMaskVersionRouteGate : EcoPolicyV3::kMaskVersionRoute, EcoPolicyV3::kMaskOverridePanic,
 												true, false, P.RouteObs[1], false, D.Mask);
-				W.Stats.ObsLayoutMismatch += W.ObsDim < Net.ObsDim ? 1 : 0;
-				float NetIn[EcoPolicyV3::kMaxObsDim] = {};
-				D.RouteRequest = EcoPolicyV3::RunPolicyV3(Net, Detail::NetInputOf(P, Net.ObsDim, NetIn), D.Mask, D.Logits);
+				if (Selector && Selector->Select)
+				{
+					D.RouteRequest = Selector->Select(Selector->User, Row, W.T, true, H, D.Mask, E01, W.Dark);
+				}
+				else
+				{
+					++W.Stats.RoutePolicyInferences;
+					W.Stats.ObsLayoutMismatch += W.ObsDim < Net.ObsDim ? 1 : 0;
+					float NetIn[EcoPolicyV3::kMaxObsDim] = {};
+					D.RouteRequest = EcoPolicyV3::RunPolicyV3(Net, Detail::NetInputOf(P, Net.ObsDim, NetIn), D.Mask, D.Logits);
+				}
 				D.bRouteReads = true;
 			}
 			D.bPrepared = true;
@@ -3055,8 +3077,14 @@ namespace EcoWorldV3
 		}
 		if (D.Prep.bReads)
 		{
-			if (Net.ObsDim > EcoObservationV3::kObsDim)
+			if (Selector && Selector->Select)
 			{
+				for (float& Logit : D.Logits) Logit = 0.0f;
+				D.Request = Selector->Select(Selector->User, Row, W.T, false, H, D.Mask, E01, W.Dark);
+			}
+			else if (Net.ObsDim > EcoObservationV3::kObsDim)
+			{
+				++W.Stats.ActionPolicyInferences;
 				// R5 관측 21 두뇌 (계약 2-4): 망 입력 = 관측 18 + 장애물 세 칸 (마스크는 앞 18 칸만 본다 — 판 2 그대로). 관측 24 두뇌는 + 길 세 칸 (도주 밖이라 0)
 				W.Stats.ObsLayoutMismatch += W.ObsDim < Net.ObsDim ? 1 : 0;
 				float NetIn[EcoPolicyV3::kMaxObsDim] = {};   // 망 칸 수 상한 (로더는 24 까지만 받는다)
@@ -3064,6 +3092,7 @@ namespace EcoWorldV3
 			}
 			else
 			{
+				++W.Stats.ActionPolicyInferences;
 				D.Request = EcoPolicyV3::RunPolicyV3(Net, P.Obs, D.Mask, D.Logits);
 			}
 		}
@@ -3079,11 +3108,11 @@ namespace EcoWorldV3
 	}
 
 	inline void DecideAll(FWorldState& W, const FHerbView* Herbs, std::int32_t N,
-						  const EcoPolicyV3::FPolicyNetV3& Net = EcoPolicyV3::kBuiltinNet)
+						  const EcoPolicyV3::FPolicyNetV3& Net = EcoPolicyV3::kBuiltinNet, const FHerbDecisionSelector* Selector = nullptr)
 	{
 		for (std::int32_t i = 0; i < N; ++i)
 		{
-			DecideHerb(W, Herbs[i], Net);
+			DecideHerb(W, Herbs[i], Net, Selector, i);
 		}
 	}
 
@@ -3101,7 +3130,7 @@ namespace EcoWorldV3
 	 */
 	inline void ObserveAndDecideRows(FWorldState& W, const FHerbView* Herbs, std::int32_t N, FThreatAgent* const* Threats,
 									 std::int32_t M, const std::int32_t* Rows, std::int32_t NumRows,
-									 const EcoPolicyV3::FPolicyNetV3& Net = EcoPolicyV3::kBuiltinNet)
+									 const EcoPolicyV3::FPolicyNetV3& Net = EcoPolicyV3::kBuiltinNet, const FHerbDecisionSelector* Selector = nullptr)
 	{
 		W.Food.ComputeFields(W.ObsCfg.SeeR);
 		Detail::BuildThreatInputs(W, Threats, M);
@@ -3119,7 +3148,7 @@ namespace EcoWorldV3
 			const std::int32_t i = Rows[r];
 			if (i >= 0 && i < N)
 			{
-				DecideHerb(W, Herbs[i], Net);
+				DecideHerb(W, Herbs[i], Net, Selector, i);
 			}
 		}
 	}
@@ -4016,7 +4045,7 @@ namespace EcoWorldV3
 			if (!D.bPrepared)
 			{
 				// 방어: 첫 관측 없이 스텝이 왔다. 지금 지각으로 준비한다 (보통 경로는 ObserveAndDecideAll·지난 스텝 H 가 한다)
-				DecideHerb(W, H, Net);
+			DecideHerb(W, H, Net, Hooks ? &Hooks->HerbDecision : nullptr, i);
 			}
 			// 10-22 두 길 두뇌: 지난 H 의 길 결정에 두뇌가 고른 칸을 적용한다 (world.py `step` 첫머리의 `_route_apply` — 덮기 방향 KeepDir 만 바꾼다. 끈 세계는 그대로)
 			Detail::RouteApply(D, bRoute, W.Stats.Route);
@@ -4693,13 +4722,48 @@ namespace EcoWorldV3
 			const double Gain = W.Want[static_cast<size_t>(i)] * F.Demand[Cell];
 			const double Nutrition = F.Vegetation.bHabitatDynamics && F.Habitats[Cell].bNatural
 				? Gain * F.VegetationCells[Cell].NutritionMultiplier() : Gain;
-			B.Energy = R3::EnergyAfterIntake(W.EDrained[static_cast<size_t>(i)], Nutrition, RC);
+			const double Drained = W.EDrained[static_cast<size_t>(i)];
+			const double NaturalEnergy = R3::EnergyAfterIntake(Drained, Nutrition, RC);
+			const double ReserveBefore = B.Reserve;
+			B.Energy = NaturalEnergy;
 			B.LastIntake = Gain;                          // 기록만
 			W.Stats.EatSteps += Gain > 0.0 ? 1 : 0;
+			FWildReserveDelta Dr;
 			if (bReserve)
 			{
 				// 야생 (w1): 모자람은 비축에서, 남음은 비축으로 (world.py step 3) 의 _wild_reserve_step — 번식 C5 앞)
-				const FWildReserveDelta Dr = WildReserveStep(B.Energy, B.Reserve, Nutrition * RC.FoodEnergyPerUnit, W.ReserveCap, W.Config.WildReserve);
+				Dr = WildReserveStep(B.Energy, B.Reserve, Nutrition * RC.FoodEnergyPerUnit, W.ReserveCap, W.Config.WildReserve);
+			}
+			if (Hooks && Hooks->HerbFeedOffer && Hooks->HerbFeedResolved)
+			{
+				const double Offer = Hooks->HerbFeedOffer(Hooks->User, i, Herbs[i], W.Catcher[i] >= 0);
+				if (Offer > 0.)
+				{
+					double Contribution = 0.;
+					// A fed deer declines the ration even if this step's basal drain left a tiny deficit.
+					if (NaturalEnergy < .90 * RC.MaxEnergy)
+					{
+						const double Extra = std::min(Offer * RC.MaxEnergy, RC.MaxEnergy - NaturalEnergy);
+						const double FedNutrition = Nutrition + Extra / RC.FoodEnergyPerUnit;
+						double FedEnergy = R3::EnergyAfterIntake(Drained, FedNutrition, RC);
+						double FedReserve = ReserveBefore;
+						const auto FedDelta = bReserve
+							? WildReserveStep(FedEnergy, FedReserve, FedNutrition * RC.FoodEnergyPerUnit, W.ReserveCap, W.Config.WildReserve)
+							: FWildReserveDelta{};
+						Contribution = (FedEnergy - B.Energy) + (bReserve ? (FedReserve - B.Reserve) * W.ReserveCap : 0.);
+						if (Contribution > 1.e-9)
+						{
+							B.Energy = FedEnergy;
+							B.Reserve = FedReserve;
+							Dr = FedDelta;
+						}
+						else Contribution = 0.;
+					}
+					Hooks->HerbFeedResolved(Hooks->User, i, Contribution / RC.MaxEnergy);
+				}
+			}
+			if (bReserve)
+			{
 				W.Stats.ReserveUsed += Dr.Used;
 				W.Stats.ReserveRefill += Dr.Refill;
 				++W.Stats.ReserveLiveSteps;
@@ -4849,7 +4913,7 @@ namespace EcoWorldV3
 		{
 			Detail::UpdateWildFlight(W, Herbs, N, Threats, M);
 		}
-		DecideAll(W, Herbs, N, Net);
+		DecideAll(W, Herbs, N, Net, Hooks ? &Hooks->HerbDecision : nullptr);
 		if (W.Config.bSenseStats)
 		{
 			Detail::TallySense(W, Herbs, N, M);   // 기록만 (감지 띠·들어서만 — 어떤 계산에도 쓰지 않는다)

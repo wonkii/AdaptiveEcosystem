@@ -4,6 +4,7 @@
 #include "Creature/Runtime/EcoFaunaMotionClock.h"
 #include "Creature/Representation/EcoCreatureRepresentationActor.h"
 #include "AI/Policy/EcoPolicyV3IntegratedSubsystem.h"
+#include "AI/Policy/EcoDeerEncounterLearning.h"
 #include "AI/Policy/EcoPolicyV3IntegratedFragments.h"
 #include "AI/Policy/EcoPolicyV3Fragments.h"
 #include "AI/Social/Herd/EcoHerdSubsystem.h"
@@ -128,6 +129,7 @@ struct FEcoEcosystemCheckpoint
     static void Ledger(FArchive& A,UEcologySimulationSubsystem& E)
     {
         using namespace EcoCheckpoint;
+        // Session-only deer experience is default-initialized with each restored region.
         Map(A,E.RegionalStates,64,[&](auto& V){Properties(A,V);Properties(A,V.CompletedEnvironment);Pod(A,V.EffectiveRegenerationMultiplier);Pod(A,V.ProjectedFoodConsumers);});
         Array(A,E.RegionIds,64,[&](FName& V){A<<V;});Array(A,E.SpeciesIds,64,[&](FName& V){A<<V;});
         A<<E.NextStableAgentId<<E.NextSpawnRequestId;
@@ -151,6 +153,7 @@ struct FEcoEcosystemCheckpoint
         if(File.IsEmpty()||!IsInGameThread()||S.GetNetMode()==NM_Client||!S.bReady||!S.bEnableEcosystemLife||S.bEnableWaves)return Reject(TEXT("authority, ready life-v1 world and valid local slot required; waves unsupported"));
         auto* W=S.GetWorld();auto* M=W->GetSubsystem<UMassSpawnerSubsystem>();auto* E=W->GetSubsystem<UEcologySimulationSubsystem>();
         auto* N=W->GetSubsystem<UEcoPolicyV3IntegratedSubsystem>();auto* Clock=W->GetSubsystem<UEcoWorldClockSubsystem>();
+        if(N && N->GetDeerDecisionTree())return Reject(TEXT("V3 deer StateTree checkpoint support is pending"));
         auto* Herds=W->GetSubsystem<UEcoHerdSubsystem>();auto* Journeys=W->GetSubsystem<UEcoHerdMigrationSubsystem>();
         if(!M||!E||!N||!N->IsActive()||!Clock||!Herds||!Journeys||M->GetEntityManagerChecked().IsProcessing()
             ||E->bResourceStepOpen||!E->PendingSpawns.IsEmpty()||!S.BuildAgentLookup())return Reject(TEXT("not a completed authority boundary"));
@@ -628,6 +631,9 @@ struct FEcoEcosystemCheckpoint
         S.FaunaLocalSoilMoisture=MoveTemp(PatchSoilMoisture);
         S.LastHerbRecovery=MoveTemp(HerbRecovery);S.LastWolfRecovery=MoveTemp(WolfRecovery);S.PendingRecoveries.Reset();
         S.ResetCombat();S.StrikeSequence=StrikeSerial;S.PlayerStrikes.Reset();
+        S.CancelDeerFeedsForRestore();
+        if (auto* Learning = W->GetSubsystem<UEcoDeerEncounterLearning>())
+            Learning->ResetForRestore();
         const bool Valid=S.BuildAgentLookup()&&S.ReconcilePopulation();if(!Valid){S.FailRuntime(TEXT("Checkpoint commit invariant"));return false;}
         S.PublishForageVisuals();
         S.UpdatePresentationAndNoise(0);S.PublishSummary();

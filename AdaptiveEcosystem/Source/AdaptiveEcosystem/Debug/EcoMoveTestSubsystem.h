@@ -36,6 +36,8 @@ struct FEcoMoveTestSample
 	int32 IslandSlide = 0, GroundRejections = 0, ContactRejections = 0;
 	int32 DeathCause = 0;
 	double Intake = 0;
+	double RegionalPlayerAttitude = 0., PlayerDistanceCm = -1., PlayerAlertCm = 0., PlayerRetreatCm = 0.;
+	int32 RegionalPlayerResponse = 0;
 	float BodyRadiusCm = 0.f;
 	bool bStaticMeshHit = false;
 	int32 StaticMoveBlock = 0, StaticFinalBlock = 0, StaticHitItem = INDEX_NONE;

@@ -1,4 +1,6 @@
 #include "AI/Behavior/StateTree/EcoSpeciesAIAssetBuilder.h"
+#include "AI/Behavior/StateTree/EcoV3DeerDecisionTree.h"
+#include "AI/Policy/EcoRepertoire.h"
 #include "AI/Behavior/StateTree/EcoSpeciesAIStateTreeNodes.h"
 #include "AI/Behavior/EcoSpeciesAIProfile.h"
 #include "Creature/Runtime/EcoCreatureNetworkTrait.h"
@@ -18,15 +20,13 @@
 #include "UObject/SavePackage.h"
 #include "Misc/PackageName.h"
 #include "Misc/Paths.h"
+#include "Misc/Parse.h"
 #include "HAL/FileManager.h"
 #include "UObject/UnrealType.h"
 #endif
 
 UEcoSpeciesAIAssetsCommandlet::UEcoSpeciesAIAssetsCommandlet()
 {IsClient=false;IsServer=false;IsEditor=true;LogToConsole=true;}
-int32 UEcoSpeciesAIAssetsCommandlet::Main(const FString&)
-{return UEcoSpeciesAIAssetBuilder::CreateDefaultAssets()?0:1;}
-
 #if WITH_EDITOR
 namespace
 {
@@ -91,8 +91,62 @@ namespace
         if(!Compiler.Compile(Tree)){Log.DumpToLog(LogTemp);return nullptr;}
         return Save(*Tree)?Tree:nullptr;
     }
+
+    bool CreateV3DeerTree()
+    {
+        using namespace EcoRepertoireV3;
+        bool bNew = false;
+        UStateTree* Tree = Create<UStateTree>(UEcoV3DeerDecisionTree::PackageName, bNew);
+        if (!Tree) return false;
+        if (!bNew)
+        {
+            const bool bReady = Tree->IsReadyToRun() && Cast<UEcoV3DeerDecisionSchema>(Tree->GetSchema());
+            UE_LOG(LogTemp, Display, TEXT("[V3DeerDecision] Existing tree %s Ready=%d"), *Tree->GetPathName(), bReady);
+            return bReady;
+        }
+
+        auto* Editor = NewObject<UStateTreeEditorData>(Tree, TEXT("EditorData"), RF_Transactional);
+        Tree->EditorData = Editor;
+        Editor->Schema = NewObject<UEcoV3DeerDecisionSchema>(Editor, NAME_None, RF_Transactional);
+        Editor->EditorSchema = NewObject<UStateTreeEditorSchema>(Editor, NAME_None, RF_Transactional);
+        auto& Root = Editor->AddSubTree(TEXT("ChooseDeerRequest"));
+        Root.SelectionBehavior = EStateTreeStateSelectionBehavior::TrySelectChildrenWithHighestUtility;
+
+        const struct { const TCHAR* Name; int32 Slot; bool bRoute; } Choices[] = {
+            {TEXT("Graze"), kGraze, false}, {TEXT("Flee"), kFlee, false}, {TEXT("Hide"), kHide, false},
+            {TEXT("Freeze"), kFreeze, false}, {TEXT("Sleep"), kSleep, false},
+            {TEXT("ShelterRoute"), kSleep, true}, {TEXT("RunRoute"), kFlee, true}
+        };
+        for (const auto& Choice : Choices)
+        {
+            auto& State = Root.AddChildState(Choice.Name);
+            FEcoV3DeerChoice Data;
+            Data.Slot = Choice.Slot;
+            Data.bRoute = Choice.bRoute;
+            State.AddEnterCondition<FEcoV3DeerChoiceCondition>().GetInstanceData() = Data;
+            State.AddConsideration<FEcoV3DeerChoiceUtility>().GetInstanceData() = Data;
+            State.AddTask<FEcoV3DeerChoiceTask>().GetInstanceData() = Data;
+        }
+        FStateTreeCompilerLog Log;
+        FStateTreeCompiler Compiler(Log);
+        if (!Compiler.Compile(Tree))
+        {
+            Log.DumpToLog(LogTemp);
+            return false;
+        }
+        return Save(*Tree);
+    }
 }
 #endif
+
+int32 UEcoSpeciesAIAssetsCommandlet::Main(const FString& Params)
+{
+#if WITH_EDITOR
+    if (FParse::Param(*Params, TEXT("V3Deer"))) return CreateV3DeerTree() ? 0 : 1;
+#endif
+    return UEcoSpeciesAIAssetBuilder::CreateDefaultAssets() ? 0 : 1;
+}
+
 bool UEcoSpeciesAIAssetBuilder::CreateDefaultAssets()
 {
 #if WITH_EDITOR

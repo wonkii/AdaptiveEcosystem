@@ -5,6 +5,7 @@
 #include "AdaptiveEcosystemGameMode.h"
 #include "AI/Policy/EcoWorldProviders.h"
 #include "Core/EcoMigrationTypes.h"
+#include "Core/EcoDeerPlayerExperience.h"
 #include "Core/EcoSurvivalTypes.h"
 #include "Core/EcoCombatTypes.h"
 #include "AI/Behavior/EcoSpeciesAIProfile.h"
@@ -182,6 +183,16 @@ public:
     UFUNCTION(BlueprintCallable, Category="Creature|Persistence") bool LoadEcosystem(const FString& Slot);
     /** Server-owned melee request; no client position, damage, target or outcome is accepted. */
     bool QueuePlayerStrike(APawn& Player);
+    UPROPERTY(EditAnywhere, Category="Creature|Deer Player Experience")
+    FEcoDeerPlayerExperienceSettings DeerPlayerExperience;
+    UPROPERTY(EditAnywhere, Category="Creature|Deer Player Experience")
+    bool bAllowDeerEncounterLearning = false;
+    bool UsesDeerPlayerExperience() const;
+    bool QueueDeerFeed(APawn& Player);
+    bool HasPendingDeerFeeds() const { return !PendingDeerFeeds.IsEmpty(); }
+    double OfferDeerFeed(int64 DeerId, const FEcoV3RegionContext& Context, FName Region, const FVector& Position,
+        double AuthorityTime, bool bCanEat);
+    void ResolveDeerFeed(int64 DeerId, FName Region, double GameTime, double EnergyFraction);
     /** Called exclusively by authoritative socket sweeps; the server reads damage from their data asset. */
     bool QueueComboContact(UEcoMeleeHitComponent& Source, AEcoCreatureHitProxy& Target, const FHitResult& Hit);
     bool QueueWeaponContact(class UEcoWeaponFireComponent& Source, AEcoCreatureHitProxy& Target, const FHitResult& Hit);
@@ -298,13 +309,35 @@ private:
     TMap<TWeakObjectPtr<APawn>,double> StrikeCooldown;
     uint64 StrikeSequence=0;
     void ProcessPlayerStrikes(const FEcoServerTimeSnapshot& Time);
+    struct FDeerFeedInventory
+    {
+        int32 Rations = 0;
+        int64 PendingDeer = 0;
+        double NextRequest = 0.;
+    };
+    struct FDeerFeedReservation
+    {
+        TWeakObjectPtr<APawn> Player;
+        TWeakObjectPtr<AController> Controller;
+        FName Region;
+        int32 Epoch = 0;
+        double IssuedAt = 0.;
+        double ExpiresAt = 0.;
+        double Energy = 0.;
+    };
+    TMap<TWeakObjectPtr<AController>, FDeerFeedInventory> DeerFeedInventories;
+    TMap<int64, FDeerFeedReservation> PendingDeerFeeds;
+    void CancelDeerFeed(int64 DeerId, const TCHAR* Reason);
+    void ExpireDeerFeeds(const FEcoServerTimeSnapshot& Time);
+    void CancelDeerFeedsForRestore();
+    void RecordDeerPlayerExperience(FName Region, double Now, bool bFeeding, double Fraction);
     double CommitNativeCarcass(const FEcoDeathOutcome& Death);
     void UpdateHitProxies();
     void ResetCombat();
     void ProcessCombatDamage(const FEcoServerTimeSnapshot& Time);
     void ProcessComboDamage(const FEcoServerTimeSnapshot& Time, uint64 ThroughSequence=MAX_uint64);
     void ProcessWolfAttacks(const FEcoServerTimeSnapshot& Time, uint64 ThroughSequence=MAX_uint64);
-    void ApplyPlayerDamage(APawn& Player, FMassEntityHandle Target, float Damage);
+    void ApplyPlayerDamage(APawn& Player, FMassEntityHandle Target, float Damage, double GameTime);
     struct FComboDamage
     {
         TWeakObjectPtr<APawn> Player;

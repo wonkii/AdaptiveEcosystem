@@ -1,4 +1,6 @@
 #include "EcoPolicyV3IntegratedSubsystem.h"
+#include "AI/Behavior/StateTree/EcoV3DeerDecisionTree.h"
+#include "Kismet/GameplayStatics.h"
 
 #include "AI/Social/Shelter/EcoShelterAnchor.h"
 #include "AI/Social/Shelter/EcoRefugeHabitat.h"
@@ -47,6 +49,56 @@
 #include "Engine/NetDriver.h"
 
 DEFINE_LOG_CATEGORY(LogEcoPolicyV3I);
+
+namespace
+{
+	TAutoConsoleVariable<int32> V3DeerStateTree(TEXT("eco.V3Deer.StateTree"), 0,
+		TEXT("Opt in to StateTree deer decisions on 1102. Set before Play."));
+
+	FAutoConsoleCommandWithWorldAndArgs V3DeerDecisionStatus(
+		TEXT("eco.V3Deer.Status"), TEXT("Report the deer decision backend and inference counts. Optional StableAgentId."),
+		FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
+		{
+			const auto* Native = World ? World->GetSubsystem<UEcoPolicyV3IntegratedSubsystem>() : nullptr;
+			if (!Native || World->GetNetMode() == NM_Client)
+			{
+				UE_LOG(LogTemp, Display, TEXT("[V3DeerDecision] Authority world required"));
+				return;
+			}
+			int64 ActionPPO = 0, RoutePPO = 0, MaskViolations = 0;
+			for (int32 Index = 0; Index < Native->NumContexts(); ++Index)
+			{
+				const auto& Stats = Native->GetContext(Index)->Sim.Stats;
+				ActionPPO += Stats.ActionPolicyInferences;
+				RoutePPO += Stats.RoutePolicyInferences;
+				MaskViolations += Stats.MaskViolations;
+			}
+			const auto* DecisionTree = Native->GetDeerDecisionTree();
+			UE_LOG(LogTemp, Display, TEXT("[V3DeerDecision] World=%s Backend=%s Active=%d Regions=%d ActionPPO=%lld RoutePPO=%lld MaskViolations=%lld"),
+				*World->GetMapName(), DecisionTree ? TEXT("StateTree") : TEXT("PPO"), Native->IsActive(),
+				Native->NumContexts(), ActionPPO, RoutePPO, MaskViolations);
+			if (DecisionTree)
+			{
+				int64 Id = 0;
+				if (!Args.IsEmpty()) LexTryParseString(Id, *Args[0]);
+				DecisionTree->Dump(Id);
+			}
+		}));
+}
+
+UEcoV3DeerDecisionTree* UEcoPolicyV3IntegratedSubsystem::GetDeerDecisionTree() const
+{
+	return DeerDecisionTree;
+}
+
+void UEcoPolicyV3IntegratedSubsystem::StopDeerDecisionTrial()
+{
+	bActive = false;
+	if (auto* Coordinator = Spawner.Get())
+	{
+		Coordinator->FailRuntime(TEXT("V3 deer StateTree has no legal request"));
+	}
+}
 
 namespace EcoPolicyV3IntegratedImpl
 {
@@ -1326,6 +1378,20 @@ void UEcoPolicyV3IntegratedSubsystem::OnWorldBeginPlay(UWorld& InWorld)
 		UE_LOG(LogEcoPolicyV3I, Warning, TEXT("[EcoV3I] 통합 조정자가 %d 개다 — 첫 번째(%s)만 바꾼다 (조정자도 하나만 허용한다)"), Found.Num(),
 			   *GetNameSafe(Found[0]));
 	}
+	FString DeerMode;
+	const bool bHasDeerModeArg = FParse::Value(FCommandLine::Get(), TEXT("EcoDeerDecision="), DeerMode);
+	const bool bStateTreeRequested = bHasDeerModeArg ? DeerMode.Equals(TEXT("StateTree"), ESearchCase::IgnoreCase)
+		: V3DeerStateTree.GetValueOnGameThread() != 0;
+	if (bStateTreeRequested && UGameplayStatics::GetCurrentLevelName(&InWorld, true) == TEXT("1102_Integration_JWJ"))
+	{
+		DeerDecisionTree = NewObject<UEcoV3DeerDecisionTree>(this);
+		if (!DeerDecisionTree->LoadTree())
+		{
+			bDeerDecisionStartupRejected = true;
+			UE_LOG(LogEcoPolicyV3I, Error, TEXT("[V3DeerDecision] Startup rejected: missing or invalid %s"), UEcoV3DeerDecisionTree::PackageName);
+			return;
+		}
+	}
 	Settings = FEcoV3IntegratedSettings::FromConsole();
 	if (!IsRequested() && Found[0]->bUseV3Policy) Settings.DeerPerRegion = Found[0]->V3DeerPerRegion;
 	if (Found[0]->bV3UseAuthoredShelters) Settings.ExtraCoverCount = 0;
@@ -1336,6 +1402,7 @@ void UEcoPolicyV3IntegratedSubsystem::OnWorldBeginPlay(UWorld& InWorld)
 	BeginPlaySeconds = InWorld.GetTimeSeconds();
 	if (!ApplyToSpawner(*Found[0]))
 	{
+		bDeerDecisionStartupRejected = DeerDecisionTree != nullptr;
 		UE_LOG(LogEcoPolicyV3I, Error, TEXT("[EcoV3I] 조정자 설정을 바꾸지 못했다 — 통합 v3 모드를 켜지 않는다 (조정자는 하나도 바꾸지 않았다, 팀 그대로)"));
 		return;
 	}
@@ -1515,6 +1582,12 @@ void UEcoPolicyV3IntegratedSubsystem::OnWorldBeginPlay(UWorld& InWorld)
 		   Settings.bRealismVision ? TEXT("300° (eco.IntegratedV3.RealismVision 1 — 바로 뒤 60° 만 사각)") : TEXT("120° (eco.IntegratedV3.RealismVision 0 — R1b 그대로)"),
 		   Settings.bRealismHearing ? TEXT("켬 (eco.IntegratedV3.RealismHearing 1 — 쫓아 달리면 최대 40 m, 어슬렁거리면 4 m, 서 있으면 없음)")
 									: TEXT("끔 (eco.IntegratedV3.RealismHearing 0)"));
+	if (DeerDecisionTree)
+	{
+		UE_LOG(LogEcoPolicyV3I, Display, TEXT("[V3DeerDecision] Backend=StateTree Tree=%s; Native movement and ledger active"),
+			UEcoV3DeerDecisionTree::PackageName);
+		return;
+	}
 	{
 		// 두뇌 바꾸기 (10-18, EcoV3Brain.h): 시작 두뇌는 줄에 넣어 첫 결정 스텝 경계(SyncBrain)에서 바꾼다 — 입양 첫 결정부터 그 두뇌다
 		FEcoV3BrainRegistry& Reg = FEcoV3BrainRegistry::Get();
@@ -3919,6 +3992,17 @@ void UEcoPolicyV3IntegratedSubsystem::ApplyBrainToWorld(EcoWorldV3::FWorldState&
 
 void UEcoPolicyV3IntegratedSubsystem::SyncBrain(bool bPollWatch)
 {
+	if (DeerDecisionTree)
+	{
+		if (!ActiveBrain.IsValid())
+		{
+			const auto Default = FEcoV3BrainRegistry::Default();
+			ActiveBrain = BrainBlocker(*Default).IsEmpty() ? Default : FEcoV3BrainRegistry::Builtin();
+			for (const auto& Context : Contexts) ApplyBrainToWorld(Context->Sim, *ActiveBrain);
+			UE_LOG(LogEcoPolicyV3I, Display, TEXT("[V3DeerDecision] Pinned world mask contract=%s"), *ActiveBrain->Id);
+		}
+		return;
+	}
 	FEcoV3BrainRegistry& Reg = FEcoV3BrainRegistry::Get();
 	const double Seconds = static_cast<double>(GlobalT) * EcoRepertoireV3::kStepSeconds;
 	// 예정 바꾸기 (측정·시연용): 전역 스텝 × 2/15 초가 그 시각 이상인 첫 경계에서 한 번

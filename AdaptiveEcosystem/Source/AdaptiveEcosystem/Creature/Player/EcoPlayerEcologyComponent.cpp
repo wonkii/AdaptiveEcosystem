@@ -93,6 +93,27 @@ void UEcoPlayerEcologyComponent::TryStrike()
 void UEcoPlayerEcologyComponent::ServerTryStrike_Implementation()
 {if(auto* P=Cast<APawn>(GetOwner());P&&P->HasAuthority()&&P->IsPlayerControlled()&&!P->GetPlayerState<AEcoPlayerState>())
     for(TActorIterator<AEcoCreatureIntegrationSpawner> It(GetWorld());It;++It){It->QueuePlayerStrike(*P);break;}}
+void UEcoPlayerEcologyComponent::TryFeedDeer()
+{
+    const auto* Pawn = Cast<APawn>(GetOwner());
+    if (!Pawn || !Pawn->IsLocallyControlled() || NextFeedRequest == MAX_int64) return;
+    const int64 RequestId = ++NextFeedRequest;
+    if (Pawn->HasAuthority()) ServerTryFeedDeer_Implementation(RequestId);
+    else ServerTryFeedDeer(RequestId);
+}
+
+void UEcoPlayerEcologyComponent::ServerTryFeedDeer_Implementation(int64 RequestId)
+{
+    auto* Pawn = Cast<APawn>(GetOwner());
+    if (!Pawn || !Pawn->HasAuthority() || !Pawn->IsPlayerControlled() || RequestId <= LastFeedRequest) return;
+    LastFeedRequest = RequestId;
+    for (TActorIterator<AEcoCreatureIntegrationSpawner> It(GetWorld()); It; ++It)
+    {
+        if (!It->UsesDeerPlayerExperience()) continue;
+        It->QueueDeerFeed(*Pawn);
+        break;
+    }
+}
 void UEcoPlayerEcologyComponent::TickComponent(float Dt,ELevelTick Type,FActorComponentTickFunction* Function)
 {
     Super::TickComponent(Dt,Type,Function);
@@ -107,6 +128,11 @@ void UEcoPlayerEcologyComponent::TickComponent(float Dt,ELevelTick Type,FActorCo
         if(Pressed&&!bStrikeHeld&&!Pawn->GetPlayerState<AEcoPlayerState>())for(TActorIterator<AEcoCreatureIntegrationSpawner> It(GetWorld());It;++It)
             if(It->bEnableEcosystemLife){TryStrike();break;}
         bStrikeHeld=Pressed;
+#if !UE_BUILD_SHIPPING
+        const bool FeedPressed = PC->IsInputKeyDown(EKeys::H);
+        if (FeedPressed && !bFeedHeld) TryFeedDeer();
+        bFeedHeld = FeedPressed;
+#endif
     }
     if(bUseKeyboardGait&&!bHasExplicitGaitInput&&Pawn->IsLocallyControlled())
         if(auto* PC=Cast<APlayerController>(Pawn->GetController()))

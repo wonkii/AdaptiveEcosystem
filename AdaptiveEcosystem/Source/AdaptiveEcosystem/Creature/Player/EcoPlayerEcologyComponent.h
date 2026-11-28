@@ -33,8 +33,16 @@ public:
     UFUNCTION(Server,Reliable) void ServerSetGait(EEcoPlayerGait NewGait);
     UFUNCTION(BlueprintCallable,Category="Player|Ecology") void TryStrike();
     UFUNCTION(Server,Reliable) void ServerTryStrike();
+    /** Requests a single ration for the deer in front of this player. */
+    UFUNCTION(BlueprintCallable,Category="Player|Ecology") void TryFeedDeer();
+    UFUNCTION(Server,Reliable) void ServerTryFeedDeer(int64 RequestId);
 private:
     bool bStrikeHeld=false;
+#if !UE_BUILD_SHIPPING
+    bool bFeedHeld=false;
+#endif
+    int64 NextFeedRequest=0;
+    int64 LastFeedRequest=0;
     bool bHasExplicitGaitInput=false;
     void ApplyLocalGait(EEcoPlayerGait NewGait);
     UFUNCTION() void OnRep_Gait();

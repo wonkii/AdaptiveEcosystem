@@ -1,7 +1,9 @@
 #include "EcoPolicyV3IntegratedProcessors.h"
 
 #include "AI/Policy/EcoBehaviorFragments.h"
+#include "AI/Policy/EcoDeerEncounterLearning.h"
 #include "AI/Behavior/EcoSpeciesAIFragments.h"
+#include "AI/Behavior/StateTree/EcoV3DeerDecisionTree.h"
 #include "Creature/Runtime/EcoCreatureMovement.h"
 #include "Creature/Audio/EcoFootstepAudioSet.h"
 #include "Creature/Runtime/EcoCreatureRuntimeTypes.h"
@@ -31,6 +33,7 @@
 #include "AI/Social/Shelter/EcoShelterLifecycleProcessor.h"
 #include "World/EcologyWorldSubsystem.h"
 #include "World/EcologyRegion.h"
+#include "World/EcoWorldClockSubsystem.h"
 #include "EcoLifeLocomotion.h"
 #if !UE_BUILD_SHIPPING
 #include "Algo/BinarySearch.h"
@@ -43,6 +46,38 @@
 
 namespace EcoPolicyV3IntegratedProcImpl
 {
+	struct FDeerDecisionRows
+	{
+		UEcoV3DeerDecisionTree* Tree;
+		const TArray<int64>& Ids;
+		int32 Epoch;
+		FName Region;
+
+		EcoWorldV3::FHerbDecisionSelector Selector()
+		{
+			return {this, Tree ? &Select : nullptr};
+		}
+
+		static std::int32_t Select(void* User, std::int32_t Row, std::int64_t Step, bool bRoute,
+			const EcoWorldV3::FHerbView& Herb, const std::uint8_t* Mask, double Energy, double Darkness)
+		{
+			const auto& Rows = *static_cast<const FDeerDecisionRows*>(User);
+			FEcoV3DeerDecisionInput Input;
+			Input.bRoute = bRoute;
+			Input.Energy = FMath::Clamp(Energy, 0.0, 1.0);
+			Input.Darkness = FMath::Clamp(Darkness, 0.0, 1.0);
+			Input.Food = Herb.Perception->Obs[EcoObservationV3::kObsFoodDensity];
+			Input.ThreatDistance = Herb.Perception->Obs[EcoObservationV3::kObsPredDist];
+			Input.bThreat = Herb.Perception->Threat.PredCount > 0;
+			Input.CurrentBehavior = Herb.Rep->Behavior;
+			for (int32 Slot = 0; Slot < EcoRepertoireV3::kNumBehaviors; ++Slot)
+			{
+				if (Mask[Slot]) Input.Mask |= 1 << Slot;
+			}
+			return Rows.Tree->Select(Rows.Epoch, Rows.Region, Rows.Ids[Row], Step, Input);
+		}
+	};
+
     const FName NativeDeerSpecies(TEXT("Herbivore"));
     const FName NativeWolfSpecies(TEXT("Wolf"));
 
@@ -74,6 +109,12 @@ namespace EcoPolicyV3IntegratedProcImpl
         const UEcoHerdMigrationSubsystem* Journeys=nullptr;
         double Now = 0;
         double AuthorityNow = -1.;
+        const FEcoDeerPlayerExperienceSettings* DeerExperienceSettings = nullptr;
+        double DeerExperienceTime = 0.;
+        double RegionalPlayerAttitude = 0.;
+        UEcoDeerEncounterLearning* EncounterLearning = nullptr;
+        double RegionalPlayerDamage = 0.;
+        double RegionalPlayerFeeding = 0.;
         bool bStaticMeshContact = false;
         FEcoV3StaticMeshMetrics* MoveMetrics = nullptr;
         EcoCreatureMovement::FGroundMoveStats* QueryStats() const { return MoveMetrics ? &MoveMetrics->Queries : nullptr; }
@@ -209,12 +250,13 @@ namespace EcoPolicyV3IntegratedProcImpl
             D.Feedback->Report(R.ReservationId,Valid?EEcoShelterMovementStatus::Yielded:EEcoShelterMovementStatus::Failed);
     }
     void ObservePlayers(const FMoveAdapter& A,EcoLifeV3::FMemory& Memory,const EcoWorldV3::FVec2& Position,
-        const EcoWorldV3::FVec2& Head,double GroundZ,double Now,double Fov,double Radius,FName Species)
+        const EcoWorldV3::FVec2& Head,double GroundZ,double Now,double Fov,double Radius,FName Species,
+        FEcoDeerPlayerEncounter* Encounter = nullptr)
     {
         const auto* Set = A.Combat ? A.Combat->FootstepAudioSet.Get() : nullptr;
         const auto* Listener = Set ? Set->FindProfile(Species) : nullptr;
         if(Now<Memory.NextScan)return;
-        Memory.NextScan=Now+(Listener?.35:1.);Memory.Age(Now);
+        Memory.NextScan=Now+(Listener||Encounter?.35:1.);Memory.Age(Now);
         double Best=MAX_dbl;const EcoObservationV3::FThreatInput* Seen=nullptr;
         for(size_t K=0;K<A.Ctx->PlayerSamples.size();++K){
             const auto& Player=A.Ctx->PlayerSamples[K];
@@ -228,6 +270,7 @@ namespace EcoPolicyV3IntegratedProcImpl
             Seen=&Player;Best=D;
         }
         if(!Seen){
+            if (Encounter) Encounter->SeenAt = -1.;
             Memory.PursuitExposure=FMath::Max(0.,Memory.PursuitExposure-1);
             // Read the position of the recorded emission.
             const FEcoLifeNoiseSample* Heard=nullptr;double Nearest=MAX_dbl;float BestSignal=0.f;
@@ -265,11 +308,77 @@ namespace EcoPolicyV3IntegratedProcImpl
             return;
         }
         const double Closing=((Position.X-Seen->X)*Seen->VelX+(Position.Y-Seen->Y)*Seen->VelY)/Best;
+        if (Encounter)
+        {
+            Encounter->SeenPosition = FVector2D(Seen->X, Seen->Y);
+            Encounter->ClosingSpeed = EcoRepertoireV3::UnitsPerStepToCmPerSec(Closing);
+            Encounter->SeenAt = Now;
+        }
         const bool ClosingFast=Closing>.35&&Best<12;
         Memory.PursuitExposure=ClosingFast?FMath::Min(3.,Memory.PursuitExposure+1):FMath::Max(0.,Memory.PursuitExposure-1);
         const auto Kind=Memory.PursuitExposure>=2?EcoLifeV3::EEncounter::Pursuit:ClosingFast?EcoLifeV3::EEncounter::FastApproach:EcoLifeV3::EEncounter::Harmless;
         Memory.Observe(Kind,EcoLifeV3::Mix(uint64(Now/5)+1),Now,Now,Seen->X,Seen->Y);
     }
+
+    struct FRegionalEncounterResult
+    {
+        double DistanceCm = -1.;
+        double AlertCm = 0.;
+        double RetreatCm = 0.;
+        EEcoDeerPlayerResponse Response = EEcoDeerPlayerResponse::None;
+    };
+
+    FRegionalEncounterResult EvaluateRegionalEncounter(const FMoveAdapter& A, const FEcoDeerPlayerEncounter& Encounter,
+        const EcoWorldV3::FVec2& Position, double Now, double Radius)
+    {
+        FRegionalEncounterResult Result;
+        if (!A.DeerExperienceSettings || Encounter.SeenAt < 0. || Now - Encounter.SeenAt > .5) return Result;
+
+        namespace R = EcoRepertoireV3;
+        const auto& Settings = *A.DeerExperienceSettings;
+        const double SightCm = R::UnitsToCm(FMath::Min(18., Radius));
+        const double DistanceCm = R::UnitsToCm(FVector2D::Distance(Encounter.SeenPosition, FVector2D(Position.X, Position.Y)));
+        if (DistanceCm > SightCm) return Result;
+
+        const double Effect = A.RegionalPlayerAttitude * FMath::Clamp(Settings.Sensitivity, 0.f, 3.f);
+        const double Approach = FMath::Clamp(Encounter.ClosingSpeed / 900., 0., 1.)
+            * FMath::Clamp(Settings.FastApproachBonus, 0.f, 1500.f);
+        const double Margin = FMath::Clamp(Settings.ReleaseMargin, 0.f, 1500.f);
+        Result.DistanceCm = DistanceCm;
+        Result.AlertCm = FMath::Clamp(Settings.AlertDistance + Effect * Settings.AlertDistanceShift + Approach,
+            FMath::Min(300., SightCm), SightCm);
+        Result.RetreatCm = FMath::Clamp(Settings.RetreatDistance + Effect * Settings.RetreatDistanceShift + .5 * Approach,
+            FMath::Min(100., Result.AlertCm), Result.AlertCm);
+        const double RetreatLimit = Encounter.Response == EEcoDeerPlayerResponse::Retreat
+            ? FMath::Min(SightCm, Result.RetreatCm + Margin) : Result.RetreatCm;
+        const double AlertLimit = Encounter.Response != EEcoDeerPlayerResponse::None
+            ? FMath::Min(SightCm, Result.AlertCm + Margin) : Result.AlertCm;
+        if (DistanceCm <= RetreatLimit) Result.Response = EEcoDeerPlayerResponse::Retreat;
+        else if (DistanceCm <= AlertLimit) Result.Response = EEcoDeerPlayerResponse::Alert;
+        return Result;
+    }
+
+    double IntegratedFeedOffer(void* User, int32 Index, const EcoWorldV3::FHerbView& H, bool bCaught)
+    {
+        const auto& A = *static_cast<const FMoveAdapter*>(User);
+        const auto& D = (*A.Deer)[(*A.Rows)[Index]];
+        const bool bCanEat = !bCaught && H.Perception->Threat.PredCount == 0 && !Traveling(User, Index)
+            && H.Rep->Behavior != EcoRepertoireV3::kSleep && H.Rep->Behavior != EcoRepertoireV3::kHide
+            && H.Rep->Behavior != EcoRepertoireV3::kFlee && H.Decision->KeepActive != EcoWorldV3::kKeepPanic
+            && H.Decision->KeepActive != EcoWorldV3::kKeepShelter
+            && D.Int->Individual.Memory.Response != EcoLifeV3::EResponse::Retreat
+            && (!D.SocialAudit || (D.SocialAudit->AppliedReservation == 0 && D.SocialAudit->Applied != EEcoV3SocialControl::Flee));
+        return A.Combat->OfferDeerFeed(D.Id, *A.Ctx, D.Region,
+            A.Ctx->UnitsToCm(H.Body->Pos.X, H.Body->Pos.Y, D.Int->GroundZ), A.DeerExperienceTime, bCanEat);
+    }
+
+    void IntegratedFeedResolved(void* User, int32 Index, double EnergyFraction)
+    {
+        const auto& A = *static_cast<const FMoveAdapter*>(User);
+        const auto& D = (*A.Deer)[(*A.Rows)[Index]];
+        A.Combat->ResolveDeerFeed(D.Id, D.Region, A.DeerExperienceTime, EnergyFraction);
+    }
+
     void LifeLocomotion(const FMoveAdapter& A,int32 Index,const EcoWorldV3::FHerbView& H)
     {
         namespace R=EcoRepertoireV3;
@@ -615,14 +724,72 @@ namespace EcoPolicyV3IntegratedProcImpl
                 const double SimTime=A.Ctx->Sim.T*EcoRepertoireV3::kStepSeconds;
                 auto& Memory=Life.Memory;
                 const bool Awake=H.Rep->Behavior!=EcoRepertoireV3::kSleep;
-                if(Awake)ObservePlayers(A,Memory,H.Body->Pos,H.Body->Head,(*A.Deer)[(*A.Rows)[Index]].Int->GroundZ,SimTime,A.Ctx->Sim.ObsCfg.ThreatFovCos,EcoWorldV3::SeePredNow(A.Ctx->Sim),TEXT("Herbivore"));
-                const double X=Memory.LastX-H.Body->Pos.X,Y=Memory.LastY-H.Body->Pos.Y;
-                const double Distance=FMath::Sqrt(X*X+Y*Y);
+                auto& Encounter = DeerRow.Int->PlayerEncounter;
+                const bool bRegional = A.DeerExperienceSettings && DeerRow.Region == A.RegionId;
+                if (!bRegional || !Awake || Encounter.Region != DeerRow.Region)
+                {
+                    Encounter = {};
+                    if (bRegional) Encounter.Region = DeerRow.Region;
+                }
+                const double SightRadius = EcoWorldV3::SeePredNow(A.Ctx->Sim);
+                if (Awake) ObservePlayers(A, Memory, H.Body->Pos, H.Body->Head, DeerRow.Int->GroundZ, SimTime,
+                    A.Ctx->Sim.ObsCfg.ThreatFovCos, SightRadius, NativeDeerSpecies, bRegional ? &Encounter : nullptr);
+                double X=Memory.LastX-H.Body->Pos.X,Y=Memory.LastY-H.Body->Pos.Y;
+                double Distance=FMath::Sqrt(X*X+Y*Y);
                 const bool bSocialOwnsControl = bUseSocialControl && DeerRow.SocialAudit
                     && (DeerRow.SocialAudit->AppliedReservation > 0 || DeerRow.SocialAudit->Applied == EEcoV3SocialControl::Flee);
                 const bool Safe=H.Decision->KeepActive!=EcoWorldV3::kKeepPanic&&H.Decision->KeepActive!=EcoWorldV3::kKeepShelter
                     &&Awake&&H.Perception->Threat.PredCount==0&&H.Body->Energy>.25&&!bSocialOwnsControl;
-                const auto Response=Memory.Decide(SimTime,Distance,Safe,bTraveling);
+                auto Response=Memory.Decide(SimTime,Distance,Safe,bTraveling);
+                const bool bRecentDamage = Memory.LastDamage >= 0. && SimTime - Memory.LastDamage < 8.;
+                const bool bRecentAlarm = Memory.LastThreat >= 0. && SimTime - Memory.LastThreat < 5.
+                    && (Memory.LastKind == EcoLifeV3::EEncounter::Surprise || Memory.LastKind == EcoLifeV3::EEncounter::WitnessLoss);
+                const bool bUseRegionalResponse = bRegional && Safe && !bTraveling && H.Control->Gait != EcoRepertoireV3::kGaitRun
+                    && H.Rep->Behavior != EcoRepertoireV3::kHide && H.Rep->Behavior != EcoRepertoireV3::kFlee
+                    && !bRecentDamage && !bRecentAlarm;
+                auto Regional = bUseRegionalResponse
+                    ? EvaluateRegionalEncounter(A, Encounter, H.Body->Pos, SimTime, SightRadius) : FRegionalEncounterResult{};
+                TOptional<EEcoDeerPlayerResponse> Learned;
+                if (A.EncounterLearning)
+                {
+                    const double RadiusCm = EcoRepertoireV3::UnitsToCm(FMath::Min(18., SightRadius));
+                    const double MaxEnergy = A.Ctx->Sim.RepCfg.MaxEnergy;
+                    if (Regional.DistanceCm >= 0. && RadiusCm > 0. && MaxEnergy > 0.)
+                        Learned = A.EncounterLearning->Decide(A.RegionId, DeerRow.Id, A.Ctx->Sim.T,
+                            Regional.DistanceCm / RadiusCm, Encounter.ClosingSpeed, H.Body->Energy / MaxEnergy,
+                            A.RegionalPlayerDamage, A.RegionalPlayerFeeding);
+                    if (Learned) Regional.Response = *Learned;
+                    else A.EncounterLearning->EndEncounter(A.RegionId, DeerRow.Id, DeerRow.Region != A.RegionId);
+                }
+                if (Regional.DistanceCm >= 0.)
+                {
+                    X = Encounter.SeenPosition.X - H.Body->Pos.X;
+                    Y = Encounter.SeenPosition.Y - H.Body->Pos.Y;
+                    Distance = EcoRepertoireV3::CmToUnits(Regional.DistanceCm);
+                    Response = Regional.Response == EEcoDeerPlayerResponse::Retreat ? EcoLifeV3::EResponse::Retreat
+                        : Regional.Response == EEcoDeerPlayerResponse::Alert ? EcoLifeV3::EResponse::Vigilant
+                        : EcoLifeV3::EResponse::Policy;
+                    Memory.Response = Response;
+                }
+                if (bRegional && A.DeerExperienceSettings->bLog && Regional.Response != EEcoDeerPlayerResponse::None
+                    && Regional.Response != Encounter.Response)
+                {
+                    UE_LOG(LogEcoPolicyV3I, Log, TEXT("[Eco Deer Experience] Region=%s Species=Herbivore Deer=%lld Response=%s DistanceCm=%.0f AlertCm=%.0f RetreatCm=%.0f Attitude=%.3f"),
+                        *DeerRow.Region.ToString(), DeerRow.Id,
+                        Regional.Response == EEcoDeerPlayerResponse::Alert ? TEXT("Alert") : TEXT("Retreat"),
+                        Regional.DistanceCm, Regional.AlertCm, Regional.RetreatCm, A.RegionalPlayerAttitude);
+                }
+                Encounter.Response = Regional.Response;
+#if !UE_BUILD_SHIPPING
+                if (Sample && bRegional)
+                {
+                    Sample->RegionalPlayerAttitude = A.RegionalPlayerAttitude;
+                    Sample->PlayerDistanceCm = Regional.DistanceCm;
+                    Sample->PlayerAlertCm = Regional.AlertCm;
+                    Sample->PlayerRetreatCm = Regional.RetreatCm;
+                    Sample->RegionalPlayerResponse = uint8(Regional.Response);
+                }
+#endif
                 if(Response!=EcoLifeV3::EResponse::Policy){
                     const double Direction=Response==EcoLifeV3::EResponse::Retreat?-1:Response==EcoLifeV3::EResponse::Curious?1:0;
                     const double V=A.Ctx->Sim.RepCfg.HerbSpeed*(Direction<0?A.Ctx->Sim.RepCfg.GaitSpeed[EcoRepertoireV3::kGaitRun]:.3);
@@ -643,6 +810,15 @@ namespace EcoPolicyV3IntegratedProcImpl
                     H.Control->EatMult=0;H.Control->DrainMult=1;H.Control->bStill=!Direction;
                     if(Direction<0){H.Control->Gait=EcoRepertoireV3::kGaitRun;H.Control->DrainMult=A.Ctx->Sim.RepCfg.GaitDrain[EcoRepertoireV3::kGaitRun];}
                     if(UnknownEscape){H.Control->Gait=EcoRepertoireV3::kGaitWalk;H.Control->bStill=false;}
+                    if (Regional.Response != EEcoDeerPlayerResponse::None)
+                    {
+                        H.Control->bHasFace = Regional.Response == EEcoDeerPlayerResponse::Alert && Distance > .01;
+                        if (H.Control->bHasFace) H.Control->Face = {X / Distance, Y / Distance};
+#if !UE_BUILD_SHIPPING
+                        if (Sample && Regional.Response == EEcoDeerPlayerResponse::Retreat && Distance > .01)
+                            Sample->FleeDirection = FVector2D(-X / Distance, -Y / Distance);
+#endif
+                    }
                     if(Direction<0||UnknownEscape){
                         const double ActualSpeed=FMath::Sqrt(FMath::Square(H.Control->Velocity.X)+FMath::Square(H.Control->Velocity.Y));
                         if(ActualSpeed>.001){
@@ -688,6 +864,15 @@ namespace EcoPolicyV3IntegratedProcImpl
                 const double Speed=Life.SpeedScale(SimTime);
                 H.Control->Velocity.X*=Speed;H.Control->Velocity.Y*=Speed;
                 H.Control->DrainMult*=Life.Maintenance();
+                if (Learned)
+                {
+                    const bool bApplied = *Learned == EEcoDeerPlayerResponse::None
+                        || (*Learned == EEcoDeerPlayerResponse::Alert && H.Control->bStill && H.Control->bHasFace)
+                        || (*Learned == EEcoDeerPlayerResponse::Retreat && H.Control->Gait == EcoRepertoireV3::kGaitRun
+                            && X * H.Control->Velocity.X + Y * H.Control->Velocity.Y < 0.);
+                    if (bApplied) A.EncounterLearning->ConfirmAction(A.RegionId, DeerRow.Id);
+                    else A.EncounterLearning->EndEncounter(A.RegionId, DeerRow.Id);
+                }
             }
         }
         if (bWaitingForRegion)
@@ -1412,6 +1597,16 @@ void UEcoPolicyV3IntegratedStepProcessor::ExecuteSteps(FMassEntityManager& Entit
 		}
 	}
 
+	auto* DecisionTree = Sub->GetDeerDecisionTree();
+	const auto* DecisionClock = World->GetSubsystem<UEcoWorldClockSubsystem>();
+	const int32 DecisionEpoch = DecisionClock ? DecisionClock->GetServerTime().WorldEpoch : 0;
+	if (DecisionTree)
+	{
+		TSet<int64> LiveDeer;
+		LiveDeer.Reserve(Deer.Num());
+		for (const auto& Row : Deer) LiveDeer.Add(Row.Id);
+		DecisionTree->RemoveMissingAgents(LiveDeer);
+	}
     TArray<int64> StableViewIds;
 	auto BuildViews = [this,&StableViewIds](int32 c)
 	{
@@ -1436,6 +1631,13 @@ void UEcoPolicyV3IntegratedStepProcessor::ExecuteSteps(FMassEntityManager& Entit
     AEcoCreatureIntegrationSpawner* CombatOwner=nullptr;
     for(TActorIterator<AEcoCreatureIntegrationSpawner> It(World);It;++It)
         if(It->bUseV3Policy && It->bEnableEcosystemLife && It->IsRuntimeReady()) { CombatOwner=*It; break; }
+    auto* EncounterLearning = World->GetSubsystem<UEcoDeerEncounterLearning>();
+    if (EncounterLearning && EncounterLearning->IsActive())
+    {
+        TMap<int64, FName> LiveRegions;
+        for (const auto& Row : Deer) LiveRegions.Add(Row.Id, Row.Region);
+        EncounterLearning->PruneEncounters(LiveRegions);
+    }
     TArray<FEcoNoiseEvent> RecentNoises;
     if(auto* Noise=World->GetSubsystem<UEcoNoiseSubsystem>())Noise->GatherRecent(RecentNoises);
     for(int32 c=0;c<NumCtx;++c) {
@@ -1521,8 +1723,15 @@ void UEcoPolicyV3IntegratedStepProcessor::ExecuteSteps(FMassEntityManager& Entit
 		if (!NewRows.IsEmpty())
 		{
 			BuildViews(c);
+			FDeerDecisionRows DecisionRows{DecisionTree, StableViewIds, DecisionEpoch, Ctx.RegionId};
+			const auto Selector = DecisionRows.Selector();
 			EcoWorldV3::ObserveAndDecideRows(Ctx.Sim, Views.GetData(), Views.Num(), ThreatPtrs.GetData(), ThreatPtrs.Num(),
-											 NewRows.GetData(), NewRows.Num(), Sub->ActiveNet());
+											 NewRows.GetData(), NewRows.Num(), Sub->ActiveNet(), &Selector);
+			if (DecisionTree && DecisionTree->HasFatalError())
+			{
+				Sub->StopDeerDecisionTrial();
+				return;
+			}
 			for (const int32 r : NewRows)
 			{
 				const FEcoV3DeerRec& D = Deer[List[r]];
@@ -1565,6 +1774,8 @@ void UEcoPolicyV3IntegratedStepProcessor::ExecuteSteps(FMassEntityManager& Entit
 		}
 		// 전역 스텝 경계마다: 예정 바꾸기(eco.V3Brain.SwapAtSeconds)가 한 프레임 안의 정확한 스텝에서 걸리게. 이 스텝의 모든 지역이 같은 두뇌다
 		Sub->SyncBrain(/*bPollWatch*/ false);
+        if (EncounterLearning)
+            EncounterLearning->Boundary(CombatOwner, DecisionEpoch, Sub->GetEnvRevision(), Sub->GetActiveBrain().Id);
 		// 환경 스냅숏 (10-18 적응 고리, EcoV3Snapshot.cpp): 예정 시각이면 이 스텝 앞 상태를 한 번 쓴다 (읽기만 — 세계를 바꾸지 않는다)
 		Sub->MaybeScheduledSnapshot();
 		// 자동·주기 스냅숏 (10-21): 환경 판이 가라앉은 뒤 판마다 한 번, eco.IntegratedV3.SnapshotEvery 주기 (읽기만)
@@ -1631,8 +1842,33 @@ void UEcoPolicyV3IntegratedStepProcessor::ExecuteSteps(FMassEntityManager& Entit
             }
             Adapter.Shelters=World->GetSubsystem<UEcoShelterSubsystem>();Adapter.Now=Now;Adapter.AuthorityNow=AuthoritySeconds;
             Adapter.Journeys=World->GetSubsystem<UEcoHerdMigrationSubsystem>();
+            if (CombatOwner && Ctx.Sim.Config.bEcosystemLife && CombatOwner->UsesDeerPlayerExperience())
+            {
+                const auto* Ecology = World->GetSubsystem<UEcologySimulationSubsystem>();
+                const auto* Clock = World->GetSubsystem<UEcoWorldClockSubsystem>();
+                if (Ecology && Clock)
+                {
+                    Adapter.DeerExperienceSettings = &CombatOwner->DeerPlayerExperience;
+                    Adapter.DeerExperienceTime = AuthoritySeconds >= 0. ? AuthoritySeconds : Clock->GetServerTime().ServerTimeSeconds;
+                    const auto Experience = Ecology->GetDeerPlayerExperience(Ctx.RegionId, Adapter.DeerExperienceTime);
+                    Adapter.RegionalPlayerAttitude = Experience.Attitude();
+                    if (EncounterLearning && EncounterLearning->IsActive())
+                    {
+                        Adapter.EncounterLearning = EncounterLearning;
+                        Adapter.RegionalPlayerDamage = Experience.Damage;
+                        Adapter.RegionalPlayerFeeding = Experience.Feeding;
+                    }
+                }
+            }
 			EcoWorldV3::FStepHooks Hooks;
 			Hooks.User = &Adapter;
+			FDeerDecisionRows DecisionRows{DecisionTree, StableViewIds, DecisionEpoch, Ctx.RegionId};
+			Hooks.HerbDecision = DecisionRows.Selector();
+            if (Adapter.DeerExperienceSettings && CombatOwner->HasPendingDeerFeeds())
+            {
+                Hooks.HerbFeedOffer = &IntegratedFeedOffer;
+                Hooks.HerbFeedResolved = &IntegratedFeedResolved;
+            }
 			// 사슴 Social 행동 연결 (조연우 님 22eb1b6). eco.IntegratedV3.SocialControl 1 일 때만 건다 — 기본 0 (사람 결정 10-17 (8))
 			Hooks.HerbControl = &IntegratedControlHook;
             Adapter.HerbIds=&StableViewIds;Adapter.WolfKeys=&WolfIds;
@@ -1885,6 +2121,11 @@ void UEcoPolicyV3IntegratedStepProcessor::ExecuteSteps(FMassEntityManager& Entit
             }
 		}
 		Sub->FinishGlobalStep();
+		if (DecisionTree && DecisionTree->HasFatalError())
+		{
+			Sub->StopDeerDecisionTrial();
+			break;
+		}
 	}
 	if (Steps > 0)
 	{

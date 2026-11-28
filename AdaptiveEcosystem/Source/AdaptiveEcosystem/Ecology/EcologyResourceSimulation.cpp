@@ -89,7 +89,11 @@ bool UEcologySimulationSubsystem::BeginResourceStep(const FEcoServerTimeSnapshot
 	ResourceLedger.Reset();
 	ResourceLedger.SetNum(RegionIds.Num());
 	for (int32 I = 0; I < RegionIds.Num(); ++I)
-		ResourceLedger[I].Before = RegionalStates.FindChecked(RegionIds[I]).FoodAmount;
+	{
+		auto& Region = RegionalStates.FindChecked(RegionIds[I]);
+		ResourceLedger[I].Before = Region.FoodAmount;
+		Region.DeerPlayerExperience.AdvanceTo(ResourceTime);
+	}
 	// Advance the regional environment exactly once per chronological resource step.
 	TickSimulation(static_cast<float>(EnvironmentDelta));
 	for (int32 I = 0; I < RegionIds.Num(); ++I)

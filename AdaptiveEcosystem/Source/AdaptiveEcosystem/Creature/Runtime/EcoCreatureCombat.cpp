@@ -193,7 +193,7 @@ void AEcoCreatureIntegrationSpawner::ProcessComboDamage(const FEcoServerTimeSnap
             if (Before <= 0) Outcome.Result = EEcoDamageResult::AlreadyDead;
             else
             {
-                ApplyPlayerDamage(*Player, *Entity, Request.Damage);
+                ApplyPlayerDamage(*Player, *Entity, Request.Damage, Time.ServerTimeSeconds);
                 Outcome.RemainingHP = EM.GetFragmentDataChecked<FEcoVitalsFragment>(*Entity).HP;
                 Outcome.AppliedDamage = Before - Outcome.RemainingHP;
                 Outcome.Result = EEcoDamageResult::Committed; ++CombatDiagnostics.DamageCommitted;

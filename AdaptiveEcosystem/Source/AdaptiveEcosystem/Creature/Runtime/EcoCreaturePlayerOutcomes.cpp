@@ -1,4 +1,5 @@
 #include "Creature/Runtime/EcoCreatureIntegrationSpawner.h"
+#include "AI/Policy/EcoDeerEncounterLearning.h"
 #include "AI/Policy/EcoPolicyV3IntegratedSubsystem.h"
 #include "AI/Policy/EcoPolicyV3IntegratedFragments.h"
 #include "AI/Policy/EcoPolicyV3Fragments.h"
@@ -55,11 +56,11 @@ void AEcoCreatureIntegrationSpawner::ProcessPlayerStrikes(const FEcoServerTimeSn
             Best=Entity;Distance=Delta.Size2D();
         }
         if(!Best.IsSet())continue;
-        ApplyPlayerDamage(*Player,Best,30.f);
+        ApplyPlayerDamage(*Player,Best,30.f,Time.ServerTimeSeconds);
     }
 }
 
-void AEcoCreatureIntegrationSpawner::ApplyPlayerDamage(APawn& Attacker, FMassEntityHandle Best, float Damage)
+void AEcoCreatureIntegrationSpawner::ApplyPlayerDamage(APawn& Attacker, FMassEntityHandle Best, float Damage, double GameTime)
 {
     APawn* Player=&Attacker;
     auto* Native=GetWorld()->GetSubsystem<UEcoPolicyV3IntegratedSubsystem>();
@@ -113,7 +114,19 @@ void AEcoCreatureIntegrationSpawner::ApplyPlayerDamage(APawn& Attacker, FMassEnt
         Memory.Suffer(Episode,Now,Known,PlayerLocal.X,PlayerLocal.Y,Known&&Memory.LastKind==EcoLifeV3::EEncounter::Pursuit);
         if(Known&&Context->Sim.Food.Vegetation.bHabitatDynamics)
             Memory.RememberHunt(From.X/EcoRepertoireV3::kUnitCm,From.Y/EcoRepertoireV3::kUnitCm,Now);
-        auto& Vitals=EM.GetFragmentDataChecked<FEcoVitalsFragment>(Best);Vitals.HP=FMath::Max(0.f,Vitals.HP-Damage);
+        auto& Vitals=EM.GetFragmentDataChecked<FEcoVitalsFragment>(Best);
+        const float BeforeHP = Vitals.HP;
+        Vitals.HP=FMath::Max(0.f,BeforeHP-Damage);
+        if (Vitals.MaxHP > 0.f && BeforeHP > Vitals.HP
+            && EM.GetFragmentDataChecked<FEcoIdentityFragment>(Best).SpeciesId == FName(TEXT("Herbivore")))
+        {
+            const FName Region = EM.GetFragmentDataChecked<FEcoRegionFragment>(Best).CurrentRegionId;
+            const double Fraction = (BeforeHP - Vitals.HP) / Vitals.MaxHP;
+            RecordDeerPlayerExperience(Region, GameTime, false, Fraction);
+            if (auto* Learning = GetWorld()->GetSubsystem<UEcoDeerEncounterLearning>())
+                Learning->RecordOutcome(*this, Region, EM.GetFragmentDataChecked<FEcoIdentityFragment>(Best).StableAgentId,
+                    false, Fraction);
+        }
         if(Vitals.HP<=0)
         {
             EM.GetFragmentDataChecked<FEcoDeathFragment>(Best).Cause=EEcoDeathCause::ExternalDamage;

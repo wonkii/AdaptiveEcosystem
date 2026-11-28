@@ -60,6 +60,12 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Ecology|Simulation")
 	bool GetRegionState(FName RegionId, FRegionEcologyState& OutState) const;
 
+	/** Record outcomes at the authority game time. Read one immutable attitude per Native region step. */
+	void RecordDeerPlayerExperience(FName RegionId, double GameTime, bool bFeeding, double Fraction,
+		const FEcoDeerPlayerExperienceSettings& Settings);
+	double GetDeerPlayerAttitude(FName RegionId, double GameTime) const;
+	FEcoDeerPlayerExperience GetDeerPlayerExperience(FName RegionId, double GameTime) const;
+
 	/** Issues the next non-zero persistent logical ID in this authoritative world. */
 	UFUNCTION(BlueprintCallable, Category = "Ecology|Simulation|Identity")
 	int64 AllocateStableAgentId();
@@ -154,6 +160,7 @@ private:
 	/** Map of authoritative regional states keyed by RegionId */
 	UPROPERTY(Transient)
 	TMap<FName, FRegionEcologyState> RegionalStates;
+	uint64 DeerExperienceSequence = 0;
 
 	/** Monotonic world-local allocator; zero is permanently reserved as invalid. */
 	FEcoAgentId NextStableAgentId = 1;

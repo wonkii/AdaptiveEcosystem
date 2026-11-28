@@ -1112,6 +1112,9 @@ public:
 	virtual void Deinitialize() override;
 
 	bool IsActive() const { return bActive; }
+	class UEcoV3DeerDecisionTree* GetDeerDecisionTree() const;
+	bool IsDeerDecisionStartupRejected() const { return bDeerDecisionStartupRejected; }
+	void StopDeerDecisionTrial();
 	/** Quiesce the native writer after a rejected authority resource transaction. */
 	void RejectResourceContract();
 	bool UsesTerrain() const { return bUseTerrain; }
@@ -1677,6 +1680,9 @@ private:
 
 	// 두뇌 (SyncBrain)
 	FEcoV3BrainPtr ActiveBrain;           // 이 월드가 지금 쓰는 두뇌 (첫 SyncBrain 전에는 비어 있다)
+	UPROPERTY(Transient)
+	TObjectPtr<class UEcoV3DeerDecisionTree> DeerDecisionTree;
+	bool bDeerDecisionStartupRejected = false;
 	uint32 AppliedBrainGen = 0;           // 지역 세계 허용 칸에 반영한 저장소 세대 (0 = 아직)
 	bool bScheduledSwapDone = false;      // 이 Play 의 예정 바꾸기를 했다 (성공·거부 모두 한 번만)
 	int64 LastBrainSwapStep = -1;

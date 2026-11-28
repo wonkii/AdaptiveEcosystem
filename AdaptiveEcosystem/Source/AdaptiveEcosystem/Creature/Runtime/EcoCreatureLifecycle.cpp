@@ -165,6 +165,7 @@ bool AEcoCreatureIntegrationSpawner::ProcessResourceStep(const FEcoServerTimeSna
 	TArray<FEcoDeathOutcome> Deaths;
     ProcessPlayerStrikes(Time);
     ProcessCombatDamage(Time);
+    if (HasPendingDeerFeeds()) ExpireDeerFeeds(Time);
     ProcessFaunaPredation(Time.ServerTimeSeconds);
 	FEcoSurvivalSettings Fallback;
 	if (!EcoMassSurvival::Advance(EM, Time, ObservedTime, NextStep, Fallback, Deaths, true)

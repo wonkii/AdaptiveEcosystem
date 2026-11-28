@@ -29,6 +29,7 @@ void UEcologySimulationSubsystem::Initialize(FSubsystemCollectionBase& Collectio
 {
 	Super::Initialize(Collection);
 	RegionalStates.Reset();
+	DeerExperienceSequence = 0;
 	NextStableAgentId = 1;
 
 	// Region authoring data is registered by the authority coordinator after all regions are ready.
@@ -140,6 +141,48 @@ bool UEcologySimulationSubsystem::GetRegionState(FName RegionId, FRegionEcologyS
 		return true;
 	}
 	return false;
+}
+
+void UEcologySimulationSubsystem::RecordDeerPlayerExperience(FName RegionId, double GameTime, bool bFeeding,
+	double Fraction, const FEcoDeerPlayerExperienceSettings& Settings)
+{
+	if (!Settings.bEnabled || !CanMutateAuthoritativeState(TEXT("RecordDeerPlayerExperience"))
+		|| !FMath::IsFinite(GameTime) || GameTime < 0. || !FMath::IsFinite(Fraction) || Fraction <= 0.) return;
+	auto* Region = RegionalStates.Find(RegionId);
+	if (!Region) return;
+
+	auto& State = Region->DeerPlayerExperience;
+	State.AdvanceTo(GameTime);
+	if (FMath::IsFinite(Settings.HalfLife))
+		State.HalfLifeSeconds = FMath::Clamp(double(Settings.HalfLife), 1., 7200.);
+	const double Before = State.Attitude();
+	double& Score = bFeeding ? State.Feeding : State.Damage;
+	uint64& Count = bFeeding ? State.FeedingEvents : State.DamageEvents;
+	const double Gain = bFeeding ? Settings.FeedingGain : Settings.DamageGain;
+	Score = FMath::Min(1., Score + FMath::Min(1., Fraction) * FMath::Clamp(Gain, 0., 10.));
+	++Count;
+	const uint64 Event = ++DeerExperienceSequence;
+	if (Settings.bLog)
+	{
+		UE_LOG(LogAdaptiveEcosystem, Log, TEXT("[Eco Deer Experience] Epoch=%d Event=%llu SimTime=%.2f Region=%s Species=Herbivore Kind=%s Fraction=%.3f DamageEvents=%llu FeedingEvents=%llu Pressure=%.3f Familiarity=%.3f Attitude=%.3f->%.3f"),
+			ResourceEpoch, Event, GameTime, *RegionId.ToString(), bFeeding ? TEXT("Feeding") : TEXT("Damage"), Fraction,
+			State.DamageEvents, State.FeedingEvents, State.Damage, State.Feeding, Before, State.Attitude());
+	}
+}
+
+double UEcologySimulationSubsystem::GetDeerPlayerAttitude(FName RegionId, double GameTime) const
+{
+	return GetDeerPlayerExperience(RegionId, GameTime).Attitude();
+}
+
+FEcoDeerPlayerExperience UEcologySimulationSubsystem::GetDeerPlayerExperience(FName RegionId, double GameTime) const
+{
+	if (!IsInGameThread() || !FMath::IsFinite(GameTime)) return {};
+	const auto* Region = RegionalStates.Find(RegionId);
+	if (!Region) return {};
+	auto Snapshot = Region->DeerPlayerExperience;
+	Snapshot.AdvanceTo(GameTime);
+	return Snapshot;
 }
 
 int64 UEcologySimulationSubsystem::AllocateStableAgentId()
@@ -271,6 +314,7 @@ bool UEcologySimulationSubsystem::CanMutateAuthoritativeState(const TCHAR* Opera
 FRegionEcologyState UEcologySimulationSubsystem::MakeSanitizedRegionState(const FRegionEcologyState& InState)
 {
 	FRegionEcologyState Result = InState;
+	Result.DeerPlayerExperience = {};
 	Result.FoodCapacity = FMath::Max(0.0f, Result.FoodCapacity);
 	Result.FoodAmount = FMath::Clamp(Result.FoodAmount, 0.0f, Result.FoodCapacity);
 	Result.FoodRegenerationRate = FMath::Max(0.0f, Result.FoodRegenerationRate);

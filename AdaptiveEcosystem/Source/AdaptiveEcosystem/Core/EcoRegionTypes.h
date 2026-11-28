@@ -3,6 +3,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "Core/EcoDeerPlayerExperience.h"
 #include "Core/EcoIds.h"
 #include "EcoRegionTypes.generated.h"
 
@@ -70,6 +71,8 @@ USTRUCT(BlueprintType)
 struct FRegionEcologyState
 {
 	GENERATED_BODY()
+	/** Anonymous Native deer experience for this session. Excluded from checkpoints and replication. */
+	FEcoDeerPlayerExperience DeerPlayerExperience;
 	/** Opt-in Ecology response to World rainfall; default preserves constant regeneration. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Ecology|Environment Response")
 	bool bRainfallAffectsRegeneration = false;
